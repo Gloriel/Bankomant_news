@@ -64,7 +64,7 @@ if not CHANNEL_ID:
 if CHANNEL_ID.lstrip('-').isdigit() and len(CHANNEL_ID.lstrip('-')) >= 10 and not CHANNEL_ID.startswith('-100'):
     CHANNEL_ID = '-100' + CHANNEL_ID.lstrip('-')
 
-MAX_POSTS_PER_DAY = 4
+MAX_POSTS_PER_DAY = 3
 MAX_CONTENT_LENGTH = 800
 MIN_CONTENT_LENGTH = 50
 
@@ -78,6 +78,25 @@ USER_AGENTS = [
 HEADERS = {
     'User-Agent': random.choice(USER_AGENTS)
 }
+
+# Ключевые слова для фильтрации финансовых новостей
+FINANCE_KEYWORDS = [
+    'банк', 'кредит', 'ипотека', 'вклад', 'депозит', 'акция', 'облигация',
+    'рубль', 'доллар', 'евро', 'инфляция', 'ставка', 'ЦБ', 'ФРС', 'биржа',
+    'криптовалюта', 'нефть', 'газ', 'экономика', 'рынок', 'инвест', 'финанс',
+    'ликвидность', 'дивиденд', 'кризис', 'санкции', 'регулятор', 'центральный банк',
+    'кредитная', 'заем', 'займ', 'рефинансирование', 'ипотечный', 'вкладной',
+    'сбережения', 'инвестиционный', 'фондовый', 'валютный', 'курс', 'обмен',
+    'платеж', 'перевод', 'карта', 'дебетовая', 'кредитная карта', 'брокер',
+    'трейдинг', 'котировки', 'индекс', 'рыночная', 'капитализация', 'актив',
+    'пассив', 'баланс', 'отчетность', 'прибыль', 'убыток', 'дивиденды',
+    'выплаты', 'квартальный', 'годовой', 'отчет', 'аудит', 'надзор', 'лицензия',
+    'отзыв лицензии', 'санация', 'банкротство', 'форекс', 'трейдер', 'инвестор',
+    'портфель', 'диверсификация', 'риск', 'доходность', 'процент', 'ставка рефинансирования',
+    'ключевая ставка', 'монетарный', 'фискальный', 'бюджет', 'налог', 'сбор',
+    'тариф', 'страхование', 'страховая', 'пенсионный', 'накопительный', 'ипотечное кредитование',
+    'потребительское кредитование', 'микрокредит', 'МФО', 'лизинг', 'факторинг'
+]
 
 # Обновленные ключевые слова → хештеги для финансовой тематики
 KEYWORDS_TO_HASHTAGS = {
@@ -179,6 +198,12 @@ class NewsBot:
         combined = f"{url_hash}_{title_hash}"
         return combined in self.posted_hashes
 
+    def is_finance_related(self, title: str, content: str) -> bool:
+        """Проверяет, относится ли новость к банковской/финансовой тематике"""
+        text = f"{title} {content}".lower()
+        # Проверяем наличие хотя бы одного финансового ключевого слова
+        return any(keyword in text for keyword in FINANCE_KEYWORDS)
+
     @staticmethod
     def clean_text(text: str) -> str:
         """Очищает текст от HTML, авторов, рекламы, лишних пробелов и мусора"""
@@ -187,18 +212,18 @@ class NewsBot:
 
         soup = BeautifulSoup(text, "html.parser")
 
-        # Удаляем рекламные и навигационные блоки (особенно актуально для banki.ru)
+        # Удаляем рекламные и навигационные блоки
         for elem in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside', 'advertisement', 'iframe', 'form']):
             elem.decompose()
 
-        # Удаляем специфические рекламные вставки banki.ru
-        for clip in soup.find_all(class_=lambda x: x and 'clip' in x):
+        # Удаляем специфические рекламные вставки
+        for clip in soup.find_all(class_=lambda x: x and any(word in str(x).lower() for word in ['clip', 'ad', 'banner', 'promo', 'recommended', 'social', 'share'])):
             clip.decompose()
 
         # Удаляем списки банков, продуктов и прочего мусора
         for ul in soup.find_all('ul'):
             text_content = ul.get_text()
-            if any(keyword in text_content.lower() for keyword in ['банк', 'вклад', 'кредит', 'карта', 'ипотека']):
+            if any(keyword in text_content.lower() for keyword in ['банк', 'вклад', 'кредит', 'карта', 'ипотека', 'реклам']):
                 ul.decompose()
 
         text = soup.get_text()
@@ -209,7 +234,7 @@ class NewsBot:
             r'^\s*[А-Я][а-я]+\s+[А-Я]\.[А-Я]\.?',
             r'^\s*[А-Я][а-я]+(?:\s+[А-Я][а-я]+)?\s*/\s*[А-Я][а-я]+',
             r'^\s*—\s*[^\n]+',
-            r'(Фото|Иллюстрация|Источник|Комментарий|Автор|Читать подробнее)[:\s].*?(?=\s*[А-Я])',
+            r'(Фото|Иллюстрация|Источник|Комментарий|Автор|Читать подробнее|Редакция|Корреспондент)[:\s].*?(?=\s*[А-Я])',
             r'^\s*[А-Я]\.\s*',
             r'^\s*Цены на.*?(?=\s*[А-Я])',
             r'^\s*По.*?на прошлой неделе.*?(?=\s*[А-Я])',
@@ -224,6 +249,18 @@ class NewsBot:
             r'Аналитик Банки\.ру.*',
             r'Рассчитать сумму.*',
             r'https?://\S+',
+            r'\d{1,2}:\d{2}',  # время
+            r'\d{1,2}\s*[а-я]+\s+\d{4}',  # даты
+            r'Читайте также.*',
+            r'Реклама.*',
+            r'Материал.*партнеров',
+            r'Обсудить в телеграме.*',
+            r'Подпишитесь на.*',
+            r'Мы в соцсетях.*',
+            r'Прислать новость.*',
+            r'Комментарии.*',
+            r'Телеграм-канал.*',
+            r'Подписывайтесь.*',
         ]
 
         for pattern in patterns:
@@ -287,6 +324,10 @@ class NewsBot:
 
                     for elem in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside', 'advertisement', 'iframe', 'form']):
                         elem.decompose()
+
+                    # Удаляем рекламные блоки
+                    for ad in soup.find_all(class_=lambda x: x and any(word in str(x).lower() for word in ['ad', 'banner', 'promo', 'recommended', 'social', 'share'])):
+                        ad.decompose()
 
                     domain = urlparse(url).netloc
                     selectors = []
@@ -455,7 +496,7 @@ class NewsBot:
                         elif hasattr(entry, "creator"):
                             creator = entry.creator
 
-                        if title and link:
+                        if title and link and self.is_finance_related(title, description):
                             entries.append({
                                 "title": title,
                                 "url": link,
@@ -483,6 +524,11 @@ class NewsBot:
         """Публикует пост с повторными попытками"""
         if self.is_duplicate(url, title):
             logger.info(f"Пропущено (дубликат): {title[:50]}...")
+            return False
+
+        # Дополнительная проверка на финансовую тематику
+        if not self.is_finance_related(title, content):
+            logger.info(f"Пропущено (не финансовая тематика): {title[:50]}...")
             return False
 
         full_text = await self.fetch_full_article_text(url)
@@ -521,30 +567,78 @@ class NewsBot:
         return False
 
     def generate_post_schedule(self) -> List[datetime]:
-        """Генерирует расписание: первая публикация сразу, остальные случайно"""
+        """Генерирует расписание публикаций с 9:00 до 20:00 по Мск"""
         now = datetime.now()
-        times = [now]  # Первая публикация сразу
-
-        for _ in range(MAX_POSTS_PER_DAY - 1):
-            random_hours = random.randint(1, 6)
-            random_minutes = random.randint(0, 59)
-            next_time = now + timedelta(hours=random_hours, minutes=random_minutes)
-
-            if next_time.hour >= 22:
-                next_time = next_time.replace(hour=21, minute=0)
-
+        
+        # Определяем временное окно (9:00-20:00 по Мск)
+        start_hour, end_hour = 9, 20
+        
+        # Если сейчас ночь, начинаем с 9:00 следующего дня
+        if now.hour < start_hour:
+            first_post_time = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        elif now.hour >= end_hour:
+            first_post_time = now.replace(hour=start_hour, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        else:
+            first_post_time = now  # Текущее время в рабочем окне
+        
+        times = [first_post_time]
+        
+        # Генерируем оставшиеся времена
+        available_hours = end_hour - start_hour
+        time_slots = MAX_POSTS_PER_DAY - 1
+        
+        # Равномерно распределяем оставшиеся публикации
+        for i in range(time_slots):
+            # Вычисляем примерный интервал между публикациями
+            interval_hours = available_hours / (time_slots + 1)
+            random_hours = interval_hours * (i + 1) + random.uniform(-1, 1)
+            
+            next_time = first_post_time + timedelta(hours=random_hours)
+            
+            # Обеспечиваем, чтобы время было в пределах 9:00-20:00
+            if next_time.hour < start_hour:
+                next_time = next_time.replace(hour=start_hour, minute=random.randint(0, 30))
+            elif next_time.hour >= end_hour:
+                next_time = next_time.replace(hour=end_hour - 1, minute=random.randint(30, 59))
+            
             times.append(next_time)
-            now = next_time
-
+        
         return sorted(times)
 
     def avoid_consecutive_sources(self, posts: List[Dict]) -> List[Dict]:
-        """Перемешивает посты, чтобы не было >2 подряд из одного источника (упрощенная версия)"""
-        if len(posts) < 3:
+        """Перемешивает посты, чтобы не было подряд из одного источника"""
+        if len(posts) < 2:
             return posts
-        # Просто перемешиваем список случайным образом
-        random.shuffle(posts)
-        return posts
+        
+        # Группируем посты по источникам
+        posts_by_source = {}
+        for post in posts:
+            source = post["source"]
+            if source not in posts_by_source:
+                posts_by_source[source] = []
+            posts_by_source[source].append(post)
+        
+        # Сортируем источники по количеству постов
+        sorted_sources = sorted(posts_by_source.keys(), key=lambda x: len(posts_by_source[x]), reverse=True)
+        
+        result = []
+        while any(posts_by_source.values()):
+            for source in sorted_sources:
+                if posts_by_source[source]:
+                    # Берем пост из текущего источника
+                    post = posts_by_source[source].pop(0)
+                    result.append(post)
+                    
+                    # Проверяем, не идут ли два поста подряд из одного источника
+                    if len(result) >= 2 and result[-2]["source"] == result[-1]["source"]:
+                        # Если да, ищем пост из другого источника для вставки
+                        for other_source in sorted_sources:
+                            if other_source != source and posts_by_source[other_source]:
+                                insert_post = posts_by_source[other_source].pop(0)
+                                result.insert(-1, insert_post)
+                                break
+        
+        return result[:MAX_POSTS_PER_DAY]
 
     async def run(self):
         """Основной цикл бота с обходом блокировок"""
@@ -588,63 +682,80 @@ class NewsBot:
                                 seen_urls.add(item["url"])
                         await asyncio.sleep(2)
                     except Exception as e:
-                        logger.error(f"Ошибка при обработке резервного источника {backup_source}: {e}")
+                        logger.error(f"Ошибка при обработке резервного источника{backup_source}: {e}")
                         self.failed_sources.add(backup_source)
 
-            # Фильтрация дубликатов
-            all_news = [n for n in all_news if not self.is_duplicate(n["url"], n["title"])]
+            # Фильтрация и сортировка новостей
+            filtered_news = []
+            for item in all_news:
+                if (not self.is_duplicate(item["url"], item["title"]) and
+                    self.is_finance_related(item["title"], item["content"]) and
+                    len(self.clean_text(item["content"])) >= MIN_CONTENT_LENGTH):
+                    filtered_news.append(item)
 
-            if not all_news:
-                logger.warning("Не найдено новых новостей для публикации")
+            # Сортируем по релевантности (можно улучшить)
+            filtered_news.sort(key=lambda x: len(x["title"]) + len(x["content"]), reverse=True)
+
+            # Избегаем последовательных публикаций из одного источника
+            filtered_news = self.avoid_consecutive_sources(filtered_news)
+
+            # Ограничиваем количество новостей
+            selected_news = filtered_news[:MAX_POSTS_PER_DAY]
+
+            if not selected_news:
+                logger.info("Нет подходящих новостей для публикации.")
                 return
 
-            if len(all_news) < MAX_POSTS_PER_DAY:
-                logger.warning(f"Недостаточно новостей: {len(all_news)} из {MAX_POSTS_PER_DAY}")
-
-            random.shuffle(all_news)
-            selected_posts = all_news[:MAX_POSTS_PER_DAY]
-            final_posts = self.avoid_consecutive_sources(selected_posts)
-
+            # Генерируем расписание публикаций
             schedule = self.generate_post_schedule()
-            # Обрезаем расписание до количества доступных постов
-            schedule = schedule[:len(final_posts)]
-            logger.info(f"Расписание публикаций: {', '.join(t.strftime('%H:%M') for t in schedule)}")
+            
+            logger.info(f"Сгенерировано расписание на {len(schedule)} публикаций:")
+            for i, pub_time in enumerate(schedule, 1):
+                logger.info(f"  {i}. {pub_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            # Публикация по расписанию
-            published_count = 0
-            for i, post_time in enumerate(schedule):
+            # Публикуем новости по расписанию
+            for i, (news_item, pub_time) in enumerate(zip(selected_news, schedule)):
+                # Ждем до времени публикации
                 now = datetime.now()
-                if i > 0:
-                    if now < post_time:
-                        wait_seconds = (post_time - now).total_seconds()
-                        logger.info(f"⏳ Ожидание до {post_time.strftime('%H:%M')} — {int(wait_seconds)} сек...")
-                        await asyncio.sleep(wait_seconds)
+                if pub_time > now:
+                    wait_seconds = (pub_time - now).total_seconds()
+                    logger.info(f"Ожидание до публикации {i+1}: {int(wait_seconds)} секунд")
+                    await asyncio.sleep(wait_seconds)
 
-                if i < len(final_posts):
-                    post = final_posts[i]
-                    success = await self.publish_post(
-                        title=post["title"],
-                        content=post["content"],
-                        url=post["url"],
-                        creator=post.get("creator", "")
-                    )
-                    if success:
-                        published_count += 1
-                else:
-                    logger.warning(f"Нет поста для публикации в слот {i}")
+                # Публикуем новость
+                success = await self.publish_post(
+                    title=news_item["title"],
+                    content=news_item["content"],
+                    url=news_item["url"],
+                    creator=news_item.get("creator", "")
+                )
 
-            logger.info(f"🔚 Цикл завершён. Опубликовано {published_count} из {len(final_posts)} запланированных публикаций.")
+                if not success and i < len(selected_news) - 1:
+                    logger.warning("Публикация не удалась, переходим к следующей новости")
+                    continue
+
+                # Пауза между публикациями (если есть еще новости)
+                if i < len(selected_news) - 1:
+                    await asyncio.sleep(random.uniform(5, 15))
+
+            logger.info("✅ Цикл публикаций завершен")
+
+            # Очистка списка неудачных источников раз в день
+            if len(self.failed_sources) > 0 and datetime.now().hour == 0:
+                logger.info("Очистка списка неудачных источников")
+                self.failed_sources.clear()
 
 
-# === Запуск бота ===
 async def main():
-    logger.info("🚀 Бот успешно запущен и готов к работе!")
-
-    bot = NewsBot(BOT_TOKEN, CHANNEL_ID)
+    """Главная функция запуска бота"""
     try:
+        bot = NewsBot(BOT_TOKEN, CHANNEL_ID)
         await bot.run()
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
     except Exception as e:
-        logger.critical(f"💥 Критическая ошибка: {e}")
+        logger.error(f"Критическая ошибка: {e}")
+        raise
 
 
 if __name__ == "__main__":
