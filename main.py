@@ -39,8 +39,8 @@ RSS_SOURCES = [
     "https://www.vedomosti.ru/rss/rubric/finance/banks.xml",
     "https://arb.ru/rss/news/",
     "https://www.kommersant.ru/RSS/news.xml",
-    "https://www.rbc.ru/rss/finances.xml",
-    "https://www.banki.ru/xml/news.rss"
+    "https://www.bfm.ru/news.rss?rubric=28",
+    "https://ria.ru/export/rss2/archive/index.xml"
 ]
 
 # Альтернативные источники на случай блокировки основных
