@@ -1,16 +1,18 @@
 import asyncio
 import hashlib
 import html
+import json
 import logging
 import os
 import random
 import re
 from datetime import datetime, timedelta
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiohttp
 import feedparser
+import pytz
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import Bot, error
@@ -164,7 +166,12 @@ class NewsBot:
         self.session: Optional[aiohttp.ClientSession] = None
         self.posted_hashes: Set[str] = set()
         self.failed_sources: Set[str] = set()
+        self.source_priority: Dict[str, int] = {}
+        self.deleted_posts_tracker: Dict[str, datetime] = {}
+        self.last_publication_time: Optional[datetime] = None
+        
         self.load_hashes()
+        self.load_source_stats()
 
     def load_hashes(self):
         """Загружает хеши опубликованных новостей"""
@@ -178,6 +185,38 @@ class NewsBot:
                 logger.info(f"Загружено {len(self.posted_hashes)} хешей из истории.")
         except Exception as e:
             logger.error(f"Ошибка при загрузке хешей: {e}")
+
+    def load_source_stats(self):
+        """Загружает статистику по источникам"""
+        try:
+            if os.path.exists('source_stats.json'):
+                with open('source_stats.json', 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.source_priority = data.get('priority', {})
+                    # Конвертируем строки дат обратно в datetime
+                    deleted_data = data.get('deleted', {})
+                    self.deleted_posts_tracker = {
+                        source: datetime.fromisoformat(date_str)
+                        for source, date_str in deleted_data.items()
+                    }
+                logger.info(f"Загружена статистика для {len(self.source_priority)} источников")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке статистики источников: {e}")
+
+    def save_source_stats(self):
+        """Сохраняет статистику по источникам"""
+        try:
+            data = {
+                'priority': self.source_priority,
+                'deleted': {
+                    source: date.isoformat()
+                    for source, date in self.deleted_posts_tracker.items()
+                }
+            }
+            with open('source_stats.json', 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении статистики источников: {e}")
 
     def save_hash(self, url: str, title: str):
         """Сохраняет хеш новости"""
@@ -197,6 +236,67 @@ class NewsBot:
         title_hash = hashlib.md5(title.encode()).hexdigest()
         combined = f"{url_hash}_{title_hash}"
         return combined in self.posted_hashes
+
+    def track_deleted_post(self, source: str):
+        """Отслеживает удаленные посты для балансировки источников"""
+        now = datetime.now()
+        self.deleted_posts_tracker[source] = now
+        
+        # Понижаем приоритет источника, если его посты удаляются
+        self.source_priority[source] = self.source_priority.get(source, 0) - 2
+        self.save_source_stats()
+        logger.info(f"Понижен приоритет источника {urlparse(source).netloc}")
+
+    def get_source_weight(self, source: str) -> float:
+        """Возвращает вес источника с учетом приоритета и времени последнего удаления"""
+        base_weight = 1.0
+        
+        # Учет приоритета
+        priority = self.source_priority.get(source, 0)
+        priority_factor = max(0.1, 1.0 + (priority * 0.1))
+        
+        # Учет времени с последнего удаления
+        if source in self.deleted_posts_tracker:
+            last_deleted = self.deleted_posts_tracker[source]
+            hours_since_deletion = (datetime.now() - last_deleted).total_seconds() / 3600
+            # Чем больше времени прошло, тем выше вес
+            time_factor = min(2.0, 1.0 + (hours_since_deletion / 24))
+        else:
+            time_factor = 1.0
+        
+        return base_weight * priority_factor * time_factor
+
+    def prioritize_sources(self, news_items: List[Dict]) -> List[Dict]:
+        """Приоритизирует новости с учетом веса источников"""
+        if not news_items:
+            return []
+        
+        # Группируем новости по источникам
+        news_by_source = {}
+        for item in news_items:
+            source = item["source"]
+            if source not in news_by_source:
+                news_by_source[source] = []
+            news_by_source[source].append(item)
+        
+        # Вычисляем веса для каждого источника
+        source_weights = {}
+        for source in news_by_source.keys():
+            source_weights[source] = self.get_source_weight(source)
+        
+        # Сортируем источники по весу (в порядке убывания)
+        sorted_sources = sorted(news_by_source.keys(), 
+                               key=lambda x: source_weights[x], 
+                               reverse=True)
+        
+        # Отбираем лучшие новости из каждого источника
+        selected_news = []
+        for source in sorted_sources:
+            # Берем не более 1 новости из источника за цикл
+            if news_by_source[source]:
+                selected_news.append(news_by_source[source][0])
+        
+        return selected_news[:MAX_POSTS_PER_DAY]
 
     def is_finance_related(self, title: str, content: str) -> bool:
         """Проверяет, относится ли новость к банковской/финансовой тематике"""
@@ -520,7 +620,7 @@ class NewsBot:
 
         return []
 
-    async def publish_post(self, title: str, content: str, url: str, creator: str = "") -> bool:
+    async def publish_post(self, title: str, content: str, url: str, creator: str = "", source: str = "") -> bool:
         """Публикует пост с повторными попытками"""
         if self.is_duplicate(url, title):
             logger.info(f"Пропущено (дубликат): {title[:50]}...")
@@ -551,6 +651,12 @@ class NewsBot:
                 )
                 logger.info(f"✅ Опубликовано: {title[:50]}...")
                 self.save_hash(url, title)
+                
+                # Повышаем приоритет успешного источника
+                if source:
+                    self.source_priority[source] = self.source_priority.get(source, 0) + 1
+                    self.save_source_stats()
+                
                 return True
             except error.RetryAfter as e:
                 logger.warning(f"⚠️ Превышен лимит, ожидание {e.retry_after} сек...")
@@ -561,49 +667,72 @@ class NewsBot:
             except Exception as e:
                 logger.error(f"❌ Ошибка при публикации '{title}' (попытка {attempt + 1}): {e}")
                 if attempt == max_retries - 1:
+                    # Отслеживаем неудачные публикации
+                    if source:
+                        self.track_deleted_post(source)
                     return False
                 await asyncio.sleep(2 ** attempt)
 
         return False
 
     def generate_post_schedule(self) -> List[datetime]:
-        """Генерирует расписание публикаций с 9:00 до 20:00 по Мск"""
-        now = datetime.now()
-        
-        # Определяем временное окно (9:00-20:00 по Мск)
-        start_hour, end_hour = 9, 20
-        
-        # Если сейчас ночь, начинаем с 9:00 следующего дня
-        if now.hour < start_hour:
-            first_post_time = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-        elif now.hour >= end_hour:
-            first_post_time = now.replace(hour=start_hour, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        else:
-            first_post_time = now  # Текущее время в рабочем окне
-        
-        times = [first_post_time]
-        
-        # Генерируем оставшиеся времена
-        available_hours = end_hour - start_hour
-        time_slots = MAX_POSTS_PER_DAY - 1
-        
-        # Равномерно распределяем оставшиеся публикации
-        for i in range(time_slots):
-            # Вычисляем примерный интервал между публикациями
-            interval_hours = available_hours / (time_slots + 1)
-            random_hours = interval_hours * (i + 1) + random.uniform(-1, 1)
+        """Генерирует расписание публикаций строго с 9:00 до 21:00 по Мск"""
+        try:
+            moscow_tz = pytz.timezone('Europe/Moscow')
+            now_moscow = datetime.now(moscow_tz)
             
-            next_time = first_post_time + timedelta(hours=random_hours)
+            # Определяем временное окно (9:00-21:00 по Мск)
+            start_hour, end_hour = 9, 21
             
-            # Обеспечиваем, чтобы время было в пределах 9:00-20:00
-            if next_time.hour < start_hour:
-                next_time = next_time.replace(hour=start_hour, minute=random.randint(0, 30))
-            elif next_time.hour >= end_hour:
-                next_time = next_time.replace(hour=end_hour - 1, minute=random.randint(30, 59))
+            # Если сейчас вне рабочего времени, начинаем с 9:00 следующего дня
+            if now_moscow.hour < start_hour:
+                first_post_time = now_moscow.replace(
+                    hour=start_hour, minute=0, second=0, microsecond=0
+                )
+            elif now_moscow.hour >= end_hour:
+                first_post_time = now_moscow.replace(
+                    hour=start_hour, minute=0, second=0, microsecond=0
+                ) + timedelta(days=1)
+            else:
+                # Текущее время в рабочем окне
+                first_post_time = now_moscow
             
-            times.append(next_time)
-        
-        return sorted(times)
+            # Генерируем времена публикаций
+            times = []
+            available_minutes = (end_hour - start_hour) * 60
+            time_slots = MAX_POSTS_PER_DAY
+            
+            # Равномерно распределяем публикации в течение дня
+            for i in range(time_slots):
+                # Вычисляем позицию в минутном интервале
+                minute_position = available_minutes * (i + 1) / (time_slots + 1)
+                random_variation = random.uniform(-30, 30)  # ±30 минут вариация
+                
+                total_minutes = minute_position + random_variation
+                hours_to_add = int(total_minutes // 60)
+                minutes_to_add = int(total_minutes % 60)
+                
+                post_time = first_post_time.replace(
+                    hour=start_hour + hours_to_add,
+                    minute=minutes_to_add,
+                    second=0,
+                    microsecond=0
+                )
+                
+                # Обеспечиваем, чтобы время было в пределах 9:00-21:00
+                if post_time.hour < start_hour:
+                    post_time = post_time.replace(hour=start_hour, minute=random.randint(0, 30))
+                elif post_time.hour >= end_hour:
+                    post_time = post_time.replace(hour=end_hour - 1, minute=random.randint(30, 59))
+                
+                times.append(post_time)
+            
+            return sorted(times)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при генерации расписания: {e}")
+            # Резервное расписание на случай ошибки
+            return [datetime.now() + timedelta(minutes=30 * i) for i in range(MAX_POSTS_PER_DAY)]
 
     def avoid_consecutive_sources(self, posts: List[Dict]) -> List[Dict]:
         """Перемешивает посты, чтобы не было подряд из одного источника"""
@@ -641,7 +770,7 @@ class NewsBot:
         return result[:MAX_POSTS_PER_DAY]
 
     async def run(self):
-        """Основной цикл бота с обходом блокировок"""
+        """Основной цикл бота с улучшенной ротацией источников"""
         connector = aiohttp.TCPConnector(limit=5, ttl_dns_cache=300)
         timeout = aiohttp.ClientTimeout(total=20)
 
@@ -685,7 +814,7 @@ class NewsBot:
                         logger.error(f"Ошибка при обработке резервного источника{backup_source}: {e}")
                         self.failed_sources.add(backup_source)
 
-            # Фильтрация и сортировка новостей
+            # Фильтрация новостей
             filtered_news = []
             for item in all_news:
                 if (not self.is_duplicate(item["url"], item["title"]) and
@@ -693,18 +822,15 @@ class NewsBot:
                     len(self.clean_text(item["content"])) >= MIN_CONTENT_LENGTH):
                     filtered_news.append(item)
 
-            # Сортируем по релевантности (можно улучшить)
-            filtered_news.sort(key=lambda x: len(x["title"]) + len(x["content"]), reverse=True)
+            # Приоритизация источников с учетом истории удалений
+            prioritized_news = self.prioritize_sources(filtered_news)
 
-            # Избегаем последовательных публикаций из одного источника
-            filtered_news = self.avoid_consecutive_sources(filtered_news)
-
-            # Ограничиваем количество новостей
-            selected_news = filtered_news[:MAX_POSTS_PER_DAY]
-
-            if not selected_news:
+            if not prioritized_news:
                 logger.info("Нет подходящих новостей для публикации.")
                 return
+
+            # Избегаем последовательных публикаций из одного источника
+            final_news = self.avoid_consecutive_sources(prioritized_news)
 
             # Генерируем расписание публикаций
             schedule = self.generate_post_schedule()
@@ -714,9 +840,9 @@ class NewsBot:
                 logger.info(f"  {i}. {pub_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
             # Публикуем новости по расписанию
-            for i, (news_item, pub_time) in enumerate(zip(selected_news, schedule)):
+            for i, (news_item, pub_time) in enumerate(zip(final_news, schedule)):
                 # Ждем до времени публикации
-                now = datetime.now()
+                now = datetime.now(pytz.timezone('Europe/Moscow'))
                 if pub_time > now:
                     wait_seconds = (pub_time - now).total_seconds()
                     logger.info(f"Ожидание до публикации {i+1}: {int(wait_seconds)} секунд")
@@ -727,15 +853,16 @@ class NewsBot:
                     title=news_item["title"],
                     content=news_item["content"],
                     url=news_item["url"],
-                    creator=news_item.get("creator", "")
+                    creator=news_item.get("creator", ""),
+                    source=news_item["source"]
                 )
 
-                if not success and i < len(selected_news) - 1:
+                if not success and i < len(final_news) - 1:
                     logger.warning("Публикация не удалась, переходим к следующей новости")
                     continue
 
                 # Пауза между публикациями (если есть еще новости)
-                if i < len(selected_news) - 1:
+                if i < len(final_news) - 1:
                     await asyncio.sleep(random.uniform(5, 15))
 
             logger.info("✅ Цикл публикаций завершен")
