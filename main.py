@@ -39,8 +39,7 @@ RSS_SOURCES = [
     "https://www.finam.ru/analytics/rsspoint/",
     "https://www.cbr.ru/rss/eventrss",
     "https://www.vedomosti.ru/rss/rubric/finance/banks.xml",
-    "https://arb.ru/rss/news/",
-    "https://www.kommersant.ru/RSS/news.xml",
+    "https://arb.ru/rss/news/",    
     "https://www.bfm.ru/news.rss?rubric=28",
     "https://ria.ru/export/rss2/archive/index.xml"
 ]
