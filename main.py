@@ -6,9 +6,10 @@ import logging
 import os
 import random
 import re
+from collections import deque
 from datetime import datetime, timedelta
 from typing import List, Dict, Set, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import aiohttp
 import feedparser
@@ -17,10 +18,10 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import Bot, error
 
-# Загрузка переменных окружения
+# ===================== ENV & LOG =====================
+
 load_dotenv()
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
@@ -30,38 +31,32 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
-# Отключаем логирование URL запросов к Telegram API (чтобы не светить токен)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# Константы
+# ===================== CONST =====================
+
 RSS_SOURCES = [
     "https://www.finam.ru/analytics/rsspoint/",
     "https://www.cbr.ru/rss/eventrss",
     "https://www.vedomosti.ru/rss/rubric/finance/banks.xml",
-    "https://arb.ru/rss/news/",    
+    "https://arb.ru/rss/news/",
     "https://www.bfm.ru/news.rss?rubric=28",
-    "https://ria.ru/export/rss2/archive/index.xml"
+    "https://ria.ru/export/rss2/archive/index.xml",
+    "https://www.vestifinance.ru/rss/news",
 ]
 
-# Альтернативные источники на случай блокировки основных
 BACKUP_SOURCES = [
-    "https://www.kommersant.ru/RSS/bank.xml",
-    "https://www.rbc.ru/rss/economics.xml",
     "https://www.interfax.ru/rss.asp",
-    "https://www.vestifinance.ru/rss/news"
 ]
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# Проверка критически важных переменных окружения
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не задан в .env файле!")
 if not CHANNEL_ID:
     raise ValueError("❌ CHANNEL_ID не задан в .env файле!")
 
-# Валидация CHANNEL_ID: для супергрупп и каналов должен начинаться с -100
 if CHANNEL_ID.lstrip('-').isdigit() and len(CHANNEL_ID.lstrip('-')) >= 10 and not CHANNEL_ID.startswith('-100'):
     CHANNEL_ID = '-100' + CHANNEL_ID.lstrip('-')
 
@@ -69,37 +64,28 @@ MAX_POSTS_PER_DAY = 3
 MAX_CONTENT_LENGTH = 800
 MIN_CONTENT_LENGTH = 50
 
-# User-Agent для обхода блокировок
 USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
 ]
 
-HEADERS = {
-    'User-Agent': random.choice(USER_AGENTS)
-}
+HEADERS = {'User-Agent': random.choice(USER_AGENTS)}
 
-# Ключевые слова для фильтрации финансовых новостей
 FINANCE_KEYWORDS = [
     'банк', 'кредит', 'ипотека', 'вклад', 'депозит', 'акция', 'облигация',
-    'рубль', 'доллар', 'евро', 'инфляция', 'ставка', 'ЦБ', 'ФРС', 'биржа',
+    'рубль', 'доллар', 'евро', 'инфляция', 'ставка', 'цб', 'фрс', 'биржа',
     'криптовалюта', 'нефть', 'газ', 'экономика', 'рынок', 'инвест', 'финанс',
     'ликвидность', 'дивиденд', 'кризис', 'санкции', 'регулятор', 'центральный банк',
-    'кредитная', 'заем', 'займ', 'рефинансирование', 'ипотечный', 'вкладной',
-    'сбережения', 'инвестиционный', 'фондовый', 'валютный', 'курс', 'обмен',
-    'платеж', 'перевод', 'карта', 'дебетовая', 'кредитная карта', 'брокер',
-    'трейдинг', 'котировки', 'индекс', 'рыночная', 'капитализация', 'актив',
-    'пассив', 'баланс', 'отчетность', 'прибыль', 'убыток', 'дивиденды',
-    'выплаты', 'квартальный', 'годовой', 'отчет', 'аудит', 'надзор', 'лицензия',
-    'отзыв лицензии', 'санация', 'банкротство', 'форекс', 'трейдер', 'инвестор',
-    'портфель', 'диверсификация', 'риск', 'доходность', 'процент', 'ставка рефинансирования',
-    'ключевая ставка', 'монетарный', 'фискальный', 'бюджет', 'налог', 'сбор',
-    'тариф', 'страхование', 'страховая', 'пенсионный', 'накопительный', 'ипотечное кредитование',
-    'потребительское кредитование', 'микрокредит', 'МФО', 'лизинг', 'факторинг'
+    'кредитная', 'заем', 'займ', 'рефинансирование', 'сбережения', 'фондовый',
+    'валютный', 'курс', 'обмен', 'платеж', 'перевод', 'карта', 'брокер',
+    'котировки', 'индекс', 'капитализация', 'актив', 'пассив', 'баланс', 'отчетность',
+    'прибыль', 'убыток', 'выплаты', 'квартальный', 'годовой', 'надзор', 'лицензия',
+    'санация', 'банкротство', 'форекс', 'инвестор', 'портфель', 'риск', 'доходность',
+    'процент', 'ключевая ставка', 'монетарный', 'фискальный', 'бюджет', 'налог', 'тариф',
+    'страхование', 'пенсионный', 'лизинг', 'факторинг'
 ]
 
-# Обновленные ключевые слова → хештеги для финансовой тематики
 KEYWORDS_TO_HASHTAGS = {
     "банк": ["#банки", "#финансы", "#банковскийСектор"],
     "кредит": ["#кредит", "#кредитование", "#займы"],
@@ -112,51 +98,81 @@ KEYWORDS_TO_HASHTAGS = {
     "евро": ["#евро", "#EUR", "#валюта"],
     "инфляция": ["#инфляция", "#цены", "#экономика"],
     "ключевая ставка": ["#ключеваяСтавка", "#ЦБ", "#процентнаяСтавка"],
-    "ЦБ": ["#Центробанк", "#регулятор", "#банкРоссии"],
-    "ФРС": ["#ФРС", "#ФедеральнаяРезервнаяСистема", "#США"],
+    "цб": ["#Центробанк", "#регулятор", "#банкРоссии"],
+    "фрс": ["#ФРС", "#США"],
     "биржа": ["#биржа", "#трейдинг", "#фондовыйРынок"],
     "криптовалюта": ["#криптовалюта", "#биткоин", "#блокчейн"],
-    "нефть": ["#нефть", "#нефтяныеКотировки", "#энергетика"],
-    "газ": ["#газ", "#энергетика", "#Газпром"],
-    "экономика": ["#экономика", "#макроэкономика", "#ВВП"],
-    "рынок": ["#финансовыйРынок", "#рынок", "#трейдеры"],
-    "инвест": ["#инвестиции", "#инвесторы", "#капиталовложения"],
-    "ликвидность": ["#ликвидность", "#денежныйРынок", "#финансы"],
-    "дивиденд": ["#дивиденды", "#доходность", "#акционеры"],
-    "кризис": ["#кризис", "#экономическийКризис", "#рецессия"],
-    "санкции": ["#санкции", "#экономическиеСанкции", "#международныеОтношения"],
-    "регулятор": ["#регулятор", "#надзор", "#финансовыйНадзор"],
+    "нефть": ["#нефть", "#энергетика"],
+    "газ": ["#газ", "#энергетика"],
+    "экономика": ["#экономика", "#макроэкономика"],
 }
 
-# Обновленные эмодзи для финансовой тематики
 TOPIC_TO_EMOJI = {
-    "банк": "🏦",
-    "кредит": "💳",
-    "ипотека": "🏠",
-    "вклад": "💰",
-    "акция": "📈",
-    "облигация": "📊",
-    "рубль": "₽",
-    "доллар": "💵",
-    "евро": "💶",
-    "инфляция": "📉",
-    "ключевая ставка": "📌",
-    "ЦБ": "🇷🇺",
-    "ФРС": "🇺🇸",
-    "биржа": "📊",
-    "криптовалюта": "₿",
-    "нефть": "🛢️",
-    "газ": "🔥",
-    "экономика": "🌐",
-    "рынок": "🤝",
-    "инвест": "💼",
-    "ликвидность": "💧",
-    "дивиденд": "🎁",
-    "кризис": "⚠️",
-    "санкции": "🚫",
-    "регулятор": "👮",
+    "банк": "🏦", "кредит": "💳", "ипотека": "🏠", "вклад": "💰",
+    "акция": "📈", "облигация": "📊", "рубль": "₽", "доллар": "💵", "евро": "💶",
+    "инфляция": "📉", "ключевая ставка": "📌", "цб": "🇷🇺", "фрс": "🇺🇸",
+    "биржа": "📊", "криптовалюта": "₿", "нефть": "🛢️", "газ": "🔥",
+    "экономика": "🌐", "рынок": "🤝", "инвест": "💼", "ликвидность": "💧",
+    "дивиденд": "🎁", "кризис": "⚠️", "санкции": "🚫", "регулятор": "👮",
 }
 
+RUS_MONTHS = r'(январ[ья]|феврал[ья]|март[ае]?|апрел[ья]|ма[ея]|июн[ья]|июл[ья]|август[ае]?|сентябр[ья]|октябр[ья]|ноябр[ья]|декабр[ья])'
+
+# ===================== UTILS =====================
+
+def canon_url(url: str) -> str:
+    """Удаляем UTM и прочие мусорные параметры, нормализуем ссылку."""
+    try:
+        u = urlparse(url)
+        q = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True)
+             if not k.lower().startswith('utm')
+             and k.lower() not in {'fbclid', 'gclid', 'yclid', 'utm_referrer'}]
+        return urlunparse((u.scheme, u.netloc, u.path, u.params, urlencode(q, doseq=True), ''))
+    except Exception:
+        return url
+
+def domain_of(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return url
+
+def normalize_title(title: str) -> str:
+    """Убираем даты/хвосты из заголовка."""
+    if not title:
+        return ""
+    # 12 мая 2025, 12 мая 2025 г., 12.05.2025 и т.п.
+    title = re.sub(rf'\b\d{{1,2}}\s+{RUS_MONTHS}\s+\d{{4}}\s*г?\.?,?\s*', ' ', title, flags=re.IGNORECASE)
+    title = re.sub(r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b', ' ', title)
+    # Хвосты вида "— Ведомости", "- РИА Новости"
+    title = re.sub(r'\s*[-—–]\s*[^\n]+$', '', title).strip()
+    return re.sub(r'\s+', ' ', title).strip()
+
+def strip_byline_dates_everywhere(text: str) -> str:
+    """Убираем авторов/даты/служебные вставки в любом месте текста."""
+    if not text:
+        return ""
+    patterns = [
+        rf'\b\d{{1,2}}\s+{RUS_MONTHS}\s+\d{{4}}\b',      # 12 мая 2025
+        r'\b\d{1,2}[:.]\d{2}\b',                         # 12:34
+        r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b',         # 12.05.2025
+        r'(?:Автор|Корреспондент|Редакция|Источник|Фото|Иллюстрация)\s*:\s*[^\n]+',
+        r'Читайте также[^\n]*',
+        r'Подпис(ывайтесь|ка)[^\n]*',
+        r'Материал.*партнеров[^\n]*',
+        r'Реклама[^\n]*',
+        r'Комментар(ий|ии)[^\n]*',
+        r'Мы в соцсетях[^\n]*',
+        r'Прислать новость[^\n]*',
+        r'Обсудить в телеграме[^\n]*',
+        r'https?://\S+',
+    ]
+    for p in patterns:
+        text = re.sub(p, ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'[!?]{3,}', ' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+# ===================== CLASS =====================
 
 class NewsBot:
     def __init__(self, bot_token: str, channel_id: str):
@@ -168,42 +184,42 @@ class NewsBot:
         self.source_priority: Dict[str, int] = {}
         self.deleted_posts_tracker: Dict[str, datetime] = {}
         self.last_publication_time: Optional[datetime] = None
-        
+
+        # ротация по источникам между циклами
+        self.recent_sources: deque[str] = deque(maxlen=12)
+
         self.load_hashes()
         self.load_source_stats()
+        self.load_recent_sources()
+
+    # ---------- persistence ----------
 
     def load_hashes(self):
-        """Загружает хеши опубликованных новостей"""
         try:
             if os.path.exists('posted_hashes.txt'):
                 with open('posted_hashes.txt', 'r', encoding='utf-8') as f:
                     lines = f.readlines()
-                    # Берем последние 500 строк для предотвращения разрастания
-                    recent_lines = lines[-500:] if len(lines) > 500 else lines
+                    recent_lines = lines[-1000:] if len(lines) > 1000 else lines
                     self.posted_hashes = set(line.strip() for line in recent_lines if line.strip())
-                logger.info(f"Загружено {len(self.posted_hashes)} хешей из истории.")
+                logger.info(f"Загружено {len(self.posted_hashes)} хешей.")
         except Exception as e:
             logger.error(f"Ошибка при загрузке хешей: {e}")
 
     def load_source_stats(self):
-        """Загружает статистику по источникам"""
         try:
             if os.path.exists('source_stats.json'):
                 with open('source_stats.json', 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.source_priority = data.get('priority', {})
-                    # Конвертируем строки дат обратно в datetime
                     deleted_data = data.get('deleted', {})
                     self.deleted_posts_tracker = {
                         source: datetime.fromisoformat(date_str)
                         for source, date_str in deleted_data.items()
                     }
-                logger.info(f"Загружена статистика для {len(self.source_priority)} источников")
         except Exception as e:
             logger.error(f"Ошибка при загрузке статистики источников: {e}")
 
     def save_source_stats(self):
-        """Сохраняет статистику по источникам"""
         try:
             data = {
                 'priority': self.source_priority,
@@ -217,275 +233,155 @@ class NewsBot:
         except Exception as e:
             logger.error(f"Ошибка при сохранении статистики источников: {e}")
 
-    def save_hash(self, url: str, title: str):
-        """Сохраняет хеш новости"""
-        url_hash = hashlib.md5(url.encode()).hexdigest()
-        title_hash = hashlib.md5(title.encode()).hexdigest()
-        combined = f"{url_hash}_{title_hash}"
-        self.posted_hashes.add(combined)
+    def load_recent_sources(self):
         try:
-            with open('posted_hashes.txt', 'a', encoding='utf-8') as f:
-                f.write(combined + '\n')
+            if os.path.exists('recent_sources.json'):
+                with open('recent_sources.json', 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    items = data.get('recent', [])
+                    self.recent_sources = deque(items, maxlen=self.recent_sources.maxlen)
+                logger.info(f"Загружено недавних источников: {len(self.recent_sources)}")
         except Exception as e:
-            logger.error(f"Не удалось сохранить хеш: {e}")
+            logger.error(f"Ошибка при загрузке recent_sources: {e}")
+
+    def save_recent_sources(self):
+        try:
+            with open('recent_sources.json', 'w', encoding='utf-8') as f:
+                json.dump({'recent': list(self.recent_sources)}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении recent_sources: {e}")
+
+    # ---------- duplicates ----------
+
+    def _hash_pair(self, url: str, title: str) -> str:
+        u = canon_url(url)
+        t = normalize_title(title).lower()
+        return hashlib.md5((u + '|' + t).encode('utf-8')).hexdigest()
+
+    def save_hash(self, url: str, title: str):
+        h = self._hash_pair(url, title)
+        if h not in self.posted_hashes:
+            self.posted_hashes.add(h)
+            try:
+                with open('posted_hashes.txt', 'a', encoding='utf-8') as f:
+                    f.write(h + '\n')
+            except Exception as e:
+                logger.error(f"Не удалось сохранить хеш: {e}")
 
     def is_duplicate(self, url: str, title: str) -> bool:
-        """Проверяет дубликаты по хешу URL и заголовка"""
-        url_hash = hashlib.md5(url.encode()).hexdigest()
-        title_hash = hashlib.md5(title.encode()).hexdigest()
-        combined = f"{url_hash}_{title_hash}"
-        return combined in self.posted_hashes
+        return self._hash_pair(url, title) in self.posted_hashes
 
-    def track_deleted_post(self, source: str):
-        """Отслеживает удаленные посты для балансировки источников"""
-        now = datetime.now()
-        self.deleted_posts_tracker[source] = now
-        
-        # Понижаем приоритет источника, если его посты удаляются
-        self.source_priority[source] = self.source_priority.get(source, 0) - 2
-        self.save_source_stats()
-        logger.info(f"Понижен приоритет источника {urlparse(source).netloc}")
-
-    def get_source_weight(self, source: str) -> float:
-        """Возвращает вес источника с учетом приоритета и времени последнего удаления"""
-        base_weight = 1.0
-        
-        # Учет приоритета
-        priority = self.source_priority.get(source, 0)
-        priority_factor = max(0.1, 1.0 + (priority * 0.1))
-        
-        # Учет времени с последнего удаления
-        if source in self.deleted_posts_tracker:
-            last_deleted = self.deleted_posts_tracker[source]
-            hours_since_deletion = (datetime.now() - last_deleted).total_seconds() / 3600
-            # Чем больше времени прошло, тем выше вес
-            time_factor = min(2.0, 1.0 + (hours_since_deletion / 24))
-        else:
-            time_factor = 1.0
-        
-        return base_weight * priority_factor * time_factor
-
-    def prioritize_sources(self, news_items: List[Dict]) -> List[Dict]:
-        """Приоритизирует новости с учетом веса источников"""
-        if not news_items:
-            return []
-        
-        # Группируем новости по источникам
-        news_by_source = {}
-        for item in news_items:
-            source = item["source"]
-            if source not in news_by_source:
-                news_by_source[source] = []
-            news_by_source[source].append(item)
-        
-        # Вычисляем веса для каждого источника
-        source_weights = {}
-        for source in news_by_source.keys():
-            source_weights[source] = self.get_source_weight(source)
-        
-        # Сортируем источники по весу (в порядке убывания)
-        sorted_sources = sorted(news_by_source.keys(), 
-                               key=lambda x: source_weights[x], 
-                               reverse=True)
-        
-        # Отбираем лучшие новости из каждого источника
-        selected_news = []
-        for source in sorted_sources:
-            # Берем не более 1 новости из источника за цикл
-            if news_by_source[source]:
-                selected_news.append(news_by_source[source][0])
-        
-        return selected_news[:MAX_POSTS_PER_DAY]
+    # ---------- quality ----------
 
     def is_finance_related(self, title: str, content: str) -> bool:
-        """Проверяет, относится ли новость к банковской/финансовой тематике"""
         text = f"{title} {content}".lower()
-        # Проверяем наличие хотя бы одного финансового ключевого слова
-        return any(keyword in text for keyword in FINANCE_KEYWORDS)
+        return any(kw in text for kw in FINANCE_KEYWORDS)
 
     @staticmethod
     def clean_text(text: str) -> str:
-        """Очищает текст от HTML, авторов, рекламы, лишних пробелов и мусора"""
         if not text:
             return ""
-
         soup = BeautifulSoup(text, "html.parser")
-
-        # Удаляем рекламные и навигационные блоки
         for elem in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside', 'advertisement', 'iframe', 'form']):
             elem.decompose()
-
-        # Удаляем специфические рекламные вставки
-        for clip in soup.find_all(class_=lambda x: x and any(word in str(x).lower() for word in ['clip', 'ad', 'banner', 'promo', 'recommended', 'social', 'share'])):
+        for clip in soup.find_all(class_=lambda x: x and any(w in str(x).lower() for w in ['clip', 'ad', 'banner', 'promo', 'recommended', 'social', 'share'])):
             clip.decompose()
-
-        # Удаляем списки банков, продуктов и прочего мусора
         for ul in soup.find_all('ul'):
-            text_content = ul.get_text()
-            if any(keyword in text_content.lower() for keyword in ['банк', 'вклад', 'кредит', 'карта', 'ипотека', 'реклам']):
+            t = ul.get_text(" ")
+            if any(k in t.lower() for k in ['банк', 'вклад', 'кредит', 'карта', 'ипотека', 'реклам']):
                 ul.decompose()
+        txt = soup.get_text(" ")
+        txt = html.unescape(txt)
+        txt = strip_byline_dates_everywhere(txt)
+        return txt
 
-        text = soup.get_text()
-        text = html.unescape(text)
-
-        # Удаляем информацию об авторе, источнике, дате и прочий мусор
-        patterns = [
-            r'^\s*[А-Я][а-я]+\s+[А-Я]\.[А-Я]\.?',
-            r'^\s*[А-Я][а-я]+(?:\s+[А-Я][а-я]+)?\s*/\s*[А-Я][а-я]+',
-            r'^\s*—\s*[^\n]+',
-            r'(Фото|Иллюстрация|Источник|Комментарий|Автор|Читать подробнее|Редакция|Корреспондент)[:\s].*?(?=\s*[А-Я])',
-            r'^\s*[А-Я]\.\s*',
-            r'^\s*Цены на.*?(?=\s*[А-Я])',
-            r'^\s*По.*?на прошлой неделе.*?(?=\s*[А-Я])',
-            r'^\s*\d{1,2}\s+[А-Яа-я]+\s+\d{4}[^А-Яа-я]*',
-            r'Ещё видео.*?(?=\s*[А-Я])',
-            r'^\s*[А-Яа-я]+\s+(?:новости|пресс-релиз|стратегии)\b',
-            r'\* Рейтинг составлен.*',
-            r'Рейтинг составлен.*',
-            r'Чтобы не.*',
-            r'Инна Солдатенкова.*',
-            r'Эксперт-аналитик.*',
-            r'Аналитик Банки\.ру.*',
-            r'Рассчитать сумму.*',
-            r'https?://\S+',
-            r'\d{1,2}:\d{2}',  # время
-            r'\d{1,2}\s*[а-я]+\s+\d{4}',  # даты
-            r'Читайте также.*',
-            r'Реклама.*',
-            r'Материал.*партнеров',
-            r'Обсудить в телеграме.*',
-            r'Подпишитесь на.*',
-            r'Мы в соцсетях.*',
-            r'Прислать новость.*',
-            r'Комментарии.*',
-            r'Телеграм-канал.*',
-            r'Подписывайтесь.*',
-        ]
-
-        for pattern in patterns:
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
-
-        # Удаляем последовательности из 3+ восклицательных или вопросительных знаков
-        text = re.sub(r'[!?]{3,}', ' ', text)
-
-        # Заменяем множественные пробелы и переносы строк на один пробел
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
-
-    def extract_hashtags(self, title: str, content: str, creator: str = "") -> List[str]:
-        """Извлекает хештеги на основе ключевых слов (макс. 5)"""
-        text = f"{title} {content} {creator}".lower()
-
+    def extract_hashtags(self, title: str, content: str) -> List[str]:
+        text = f"{title} {content}".lower()
         hashtags = set()
         for keyword, tags in KEYWORDS_TO_HASHTAGS.items():
-            if keyword.lower() in text:
+            if keyword in text:
                 hashtags.update(tags)
-
-        # Дополнительные правила для финансовой тематики
-        extra = []
         if any(w in text for w in ["биржа", "трейдинг", "инвест"]):
-            extra.append("#инвестиции")
-        if any(w in text for w in ["крипто", "биткоин", "блокчейн"]):
-            extra.append("#криптовалюты")
+            hashtags.add("#инвестиции")
+        if any(w in text for w in ["крипто", "биткоин", "блокчейн", "криптовалюта"]):
+            hashtags.add("#криптовалюты")
         if any(w in text for w in ["нефть", "газ", "энергетика"]):
-            extra.append("#энергетика")
+            hashtags.add("#энергетика")
         if any(w in text for w in ["санкции", "эмбарго", "ограничения"]):
-            extra.append("#международныеОтношения")
+            hashtags.add("#международныеОтношения")
+        return sorted(hashtags)[:5]
 
-        hashtags.update(extra)
-        return sorted(set(hashtags))[:5]
-
-    def get_relevant_emoji(self, title: str, content: str, creator: str = "") -> str:
-        """Возвращает релевантный эмодзи"""
-        text = f"{title} {content} {creator}".lower()
+    def get_relevant_emoji(self, title: str, content: str) -> str:
+        text = f"{title} {content}".lower()
         for keyword, emoji in sorted(TOPIC_TO_EMOJI.items(), key=lambda x: len(x[0]), reverse=True):
-            if keyword.lower() in text:
+            if keyword in text:
                 return emoji
         return "📰"
 
     async def fetch_full_article_text(self, url: str) -> str:
-        """Парсит полный текст статьи с веб-страницы с повторными попытками"""
         max_retries = 3
+        u = canon_url(url)
         for attempt in range(max_retries):
             try:
                 headers = HEADERS.copy()
                 headers['User-Agent'] = random.choice(USER_AGENTS)
-
-                async with self.session.get(url, headers=headers, timeout=15) as response:
-                    if response.status != 200:
-                        logger.warning(f"Не удалось загрузить статью {url}: статус {response.status}")
+                async with self.session.get(u, headers=headers, timeout=15) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Не удалось загрузить {u}: {resp.status}")
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                         continue
-
-                    html_text = await response.text()
+                    html_text = await resp.text()
                     soup = BeautifulSoup(html_text, "html.parser")
-
                     for elem in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside', 'advertisement', 'iframe', 'form']):
                         elem.decompose()
-
-                    # Удаляем рекламные блоки
-                    for ad in soup.find_all(class_=lambda x: x and any(word in str(x).lower() for word in ['ad', 'banner', 'promo', 'recommended', 'social', 'share'])):
+                    for ad in soup.find_all(class_=lambda x: x and any(w in str(x).lower() for w in ['ad', 'banner', 'promo', 'recommended', 'social', 'share'])):
                         ad.decompose()
 
-                    domain = urlparse(url).netloc
+                    dom = domain_of(u)
                     selectors = []
-
-                    if "finam.ru" in domain:
+                    if "finam.ru" in dom:
                         selectors = ['.article__body', '.content', 'article']
-                    elif "cbr.ru" in domain:
+                    elif "cbr.ru" in dom:
                         selectors = ['.content', '.text', 'article']
-                    elif "vedomosti.ru" in domain:
+                    elif "vedomosti.ru" in dom:
                         selectors = ['.article__body', '.article-body', 'article']
-                    elif "arb.ru" in domain:
+                    elif "arb.ru" in dom:
                         selectors = ['.news-detail', '.content', 'article']
-                    elif "kommersant.ru" in domain:
-                        selectors = ['.article__text', '.article-text', 'article']
-                    elif "rbc.ru" in domain:
-                        selectors = ['.article__text', '.article__content', 'article']
-                    elif "banki.ru" in domain:
-                        selectors = ['.news-text', '.article-content', 'article']
+                    elif "kommersant.ru" in dom or "rbc.ru" in dom or "banki.ru" in dom:
+                        selectors = ['.article__text', '.article__content', '.news-text', '.article-content', 'article']
                     else:
-                        selectors = ['.article-content', '.post-content', '.entry-content',
-                                   '.article__body', '.article-body', 'article', '.content']
+                        selectors = ['.article-content', '.post-content', '.entry-content', '.article__body', '.article-body', 'article', '.content']
 
                     content = None
-                    for selector in selectors:
+                    for sel in selectors:
                         try:
-                            if selector.startswith('.'):
-                                content = soup.find(class_=selector[1:])
-                            elif selector.startswith('#'):
-                                content = soup.find(id=selector[1:])
+                            if sel.startswith('.'):
+                                content = soup.find(class_=sel[1:])
+                            elif sel.startswith('#'):
+                                content = soup.find(id=sel[1:])
                             else:
-                                content = soup.find(selector)
+                                content = soup.find(sel)
                             if content:
                                 break
                         except Exception:
                             continue
-
                     if not content:
-                        all_texts = soup.find_all(text=True)
-                        text_blocks = [t.parent for t in all_texts if len(t.strip()) > 50]
-                        text_blocks.sort(key=lambda x: len(x.get_text()), reverse=True)
-                        content = text_blocks[0] if text_blocks else soup.find('body')
-
-                    if content:
-                        return self.clean_text(content.get_text())
-                    return ""
+                        all_text = soup.get_text(" ")
+                        return self.clean_text(all_text)
+                    return self.clean_text(content.get_text(" "))
 
             except asyncio.TimeoutError:
-                logger.warning(f"Таймаут при парсинге статьи {url}, попытка {attempt + 1}")
+                logger.warning(f"Таймаут при парсинге {u}, попытка {attempt + 1}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
             except Exception as e:
-                logger.error(f"Ошибка при парсинге статьи {url}: {e}, попытка {attempt + 1}")
+                logger.error(f"Ошибка при парсинге {u}: {e}, попытка {attempt + 1}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
-
         return ""
 
     def smart_truncate(self, text: str, max_length: int = MAX_CONTENT_LENGTH) -> str:
-        """Обрезает текст по границе предложений"""
         if len(text) <= max_length:
             return text
         truncated = text[:max_length + 1]
@@ -493,387 +389,336 @@ class NewsBot:
         if last_end > max_length - 100:
             return truncated[:last_end + 1]
         else:
-            return truncated[:max_length] + "…"
+            return truncated[:max_length].rstrip() + "…"
 
-    def format_message(self, title: str, content: str, url: str, creator: str = "") -> str:
-        """Форматирует сообщение с HTML-разметкой, проверяя длину и форматируя абзацы"""
-        # Удаляем даты из заголовка
-        title = re.sub(r'\s*\d{1,2}\s+[А-Яа-я]+\s+\d{4}\s*года?\b', '', title, flags=re.IGNORECASE).strip()
-
+    def format_message(self, title: str, content: str, url: str) -> str:
+        title = normalize_title(title)
         full_text = self.clean_text(content)
         if full_text.startswith(title):
             full_text = full_text[len(title):].lstrip(":.- ")
+        truncated = self.smart_truncate(full_text, MAX_CONTENT_LENGTH)
 
-        truncated_content = self.smart_truncate(full_text, MAX_CONTENT_LENGTH)
-
-        # Разбиваем на предложения и формируем абзацы по 1-2 предложения
-        sentences = re.split(r'(?<=[.!?])\s+', truncated_content)
-        paragraphs = []
-        current_paragraph = ""
-
-        for sentence in sentences:
-            if not current_paragraph:
-                current_paragraph = sentence
-            elif len(current_paragraph.split('. ')) < 2:  # Если в абзаце меньше 2 предложений
-                current_paragraph += " " + sentence
+        # Делим на 1–2 предложения в абзаце
+        sentences = re.split(r'(?<=[.!?])\s+', truncated)
+        paragraphs, buf = [], ""
+        for s in sentences:
+            if not buf:
+                buf = s
+            elif len(re.findall(r'[.!?]', buf)) < 2:
+                buf += " " + s
             else:
-                paragraphs.append(current_paragraph.strip())
-                current_paragraph = sentence
+                paragraphs.append(buf.strip())
+                buf = s
+        if buf:
+            paragraphs.append(buf.strip())
+        formatted = "\n\n".join(p for p in paragraphs if len(p) > 20)
 
-        if current_paragraph:
-            paragraphs.append(current_paragraph.strip())
-
-        # Форматируем абзацы
-        formatted_content = "\n\n".join(f"{p}" for p in paragraphs if len(p) > 20)
-
-        hashtags = self.extract_hashtags(title, content, creator)
+        hashtags = self.extract_hashtags(title, content)
         hashtag_line = "\n\n" + " ".join(hashtags) if hashtags else ""
-        emoji = self.get_relevant_emoji(title, content, creator)
+        emoji = self.get_relevant_emoji(title, content)
 
         message = (
-            f"<b>{emoji} {title}</b>\n\n"
-            f"{formatted_content}\n\n"
-            f"👉 <a href='{url}'>Читать далее</a>"
+            f"<b>{emoji} {html.escape(title)}</b>\n\n"
+            f"{html.escape(formatted)}\n\n"
+            f"👉 <a href='{html.escape(canon_url(url))}'>Читать далее</a>"
             f"{hashtag_line}"
         )
-
-        # Проверка длины сообщения (лимит Telegram ~4096 символов)
         if len(message) > 3900:
             message = message[:3897] + "..."
-
         return message
 
+    # ---------- fetching ----------
+
     async def fetch_feed(self, url: str) -> List[Dict]:
-        """Парсинг RSS-ленты с улучшенной очисткой и повторными попытками"""
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 headers = HEADERS.copy()
                 headers['User-Agent'] = random.choice(USER_AGENTS)
-
                 async with self.session.get(url, headers=headers, timeout=15) as response:
                     if response.status != 200:
-                        logger.warning(f"Ошибка HTTP {response.status} при запросе {url}")
+                        logger.warning(f"HTTP {response.status} на {url}")
                         self.failed_sources.add(url)
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                         continue
-
                     content = await response.text()
-                    # Используем to_thread для синхронной библиотеки feedparser
                     feed = await asyncio.to_thread(feedparser.parse, content)
                     entries = []
-
                     for entry in feed.entries:
-                        title = entry.get("title", "").strip()
+                        title = (entry.get("title") or "").strip()
+                        if not title:
+                            continue
                         if "видео" in title.lower() or "video" in title.lower():
                             continue
-
-                        # Очистка заголовка
-                        title = re.sub(r'^(.*?)(?:\s*-\s*[А-Яа-я]+)*$', r'\1', title).strip()
-                        link = entry.get("link", "").strip()
-                        description = entry.get("description", "") or entry.get("summary", "")
-
+                        title = normalize_title(title)
+                        link = canon_url((entry.get("link") or "").strip())
+                        description = entry.get("description", "") or entry.get("summary", "") or ""
                         if "<![CDATA[" in description:
                             description = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', description, flags=re.DOTALL)
 
-                        # Очистка описания
                         soup_desc = BeautifulSoup(description, "html.parser")
-                        description = soup_desc.get_text()
+                        description = strip_byline_dates_everywhere(soup_desc.get_text(" "))
 
-                        description = re.sub(r'^\s*[А-Я]\.\s*[А-Я][а-я]+\s*/\s*[А-Я][а-я]+', '', description)
-                        description = re.sub(r'^\s*[А-Я][а-я]+\s+[А-Я]\.\s*', '', description)
-                        description = re.sub(r'^\s*(?:Автор|Источник):?\s*[^\s]+\s*', '', description, flags=re.IGNORECASE)
-
+                        # Авторов и метки — не используем в выводе, чтобы не «засорять»
                         creator = ""
-                        if hasattr(entry, "tags") and entry.tags:
-                            creator = " ".join([tag.term for tag in entry.tags[:2]])
-                        elif hasattr(entry, "author"):
-                            creator = entry.author
-                        elif hasattr(entry, "dc") and hasattr(entry.dc, "creator"):
-                            creator = entry.dc.creator
-                        elif hasattr(entry, "creator"):
-                            creator = entry.creator
 
                         if title and link and self.is_finance_related(title, description):
                             entries.append({
                                 "title": title,
                                 "url": link,
                                 "content": description,
-                                "creator": creator or "",
-                                "source": url
+                                "creator": creator,
+                                "source": url,
+                                "domain": domain_of(link),
                             })
-
-                    logger.info(f"Получено {len(entries)} новостей из {urlparse(url).netloc}")
+                    logger.info(f"{urlparse(url).netloc}: {len(entries)} новостей")
                     return entries
-
             except asyncio.TimeoutError:
-                logger.warning(f"Таймаут при парсинге фида {url}, попытка {attempt + 1}")
+                logger.warning(f"Таймаут RSS {url}, попытка {attempt + 1}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
             except Exception as e:
-                logger.error(f"Ошибка при парсинге {url}: {e}, попытка {attempt + 1}")
+                logger.error(f"Ошибка RSS {url}: {e}, попытка {attempt + 1}")
                 self.failed_sources.add(url)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
-
         return []
 
-    async def publish_post(self, title: str, content: str, url: str, creator: str = "", source: str = "") -> bool:
-        """Публикует пост с повторными попытками"""
-        if self.is_duplicate(url, title):
-            logger.info(f"Пропущено (дубликат): {title[:50]}...")
-            return False
+    # ---------- selection & rotation ----------
 
-        # Дополнительная проверка на финансовую тематику
+    def select_news_fair(self, news_items: List[Dict], k: int) -> List[Dict]:
+        """
+        Справедливый отбор по источникам/доменам:
+        1) Сначала берём новости из доменов, которых нет в recent_sources.
+        2) Затем — заполняем остаток, избегая подряд одинаковых доменов.
+        """
+        if not news_items:
+            return []
+
+        # Уберём явные дубликаты по (url,title)
+        uniq = {}
+        for n in news_items:
+            key = (canon_url(n["url"]), normalize_title(n["title"]).lower())
+            if key not in uniq:
+                uniq[key] = n
+        items = list(uniq.values())
+
+        # Сортируем по времени появления в сборке (как пришли) — можно перемешать
+        random.shuffle(items)
+
+        recent = set(self.recent_sources)
+        first_pass = [n for n in items if n["domain"] not in recent]
+        second_pass = [n for n in items if n["domain"] in recent]
+
+        result: List[Dict] = []
+        used_domains: Set[str] = set()
+
+        def take_from(bucket: List[Dict]):
+            nonlocal result, used_domains
+            for n in bucket:
+                if len(result) >= k:
+                    break
+                d = n["domain"]
+                if result and result[-1]["domain"] == d:
+                    continue  # не ставим подряд
+                result.append(n)
+                used_domains.add(d)
+
+        take_from(first_pass)
+        if len(result) < k:
+            take_from(second_pass)
+
+        # если всё ещё не хватает — добираем чем есть, аккуратно чередуя
+        if len(result) < k:
+            leftovers = [n for n in items if n not in result]
+            for n in leftovers:
+                if len(result) >= k:
+                    break
+                if not result or result[-1]["domain"] != n["domain"]:
+                    result.append(n)
+
+        # обновим недавние источники
+        for n in result:
+            self.recent_sources.append(n["domain"])
+        self.save_recent_sources()
+
+        return result[:k]
+
+    # ---------- publish ----------
+
+    async def publish_post(self, title: str, content: str, url: str, source: str = "") -> bool:
+        if self.is_duplicate(url, title):
+            logger.info(f"Пропущено (дубликат): {title[:60]}...")
+            return False
         if not self.is_finance_related(title, content):
-            logger.info(f"Пропущено (не финансовая тематика): {title[:50]}...")
+            logger.info(f"Пропущено (не финтематика): {title[:60]}...")
             return False
 
         full_text = await self.fetch_full_article_text(url)
         use_text = full_text if full_text.strip() else content
-
-        cleaned_text = self.clean_text(use_text)
-        if len(cleaned_text) < MIN_CONTENT_LENGTH:
-            logger.info(f"Пропущено (мало текста): {title[:50]}...")
+        cleaned = self.clean_text(use_text)
+        if len(cleaned) < MIN_CONTENT_LENGTH:
+            logger.info(f"Пропущено (мало текста): {title[:60]}...")
             return False
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                message = self.format_message(title, use_text, url, creator)
+                message = self.format_message(title, use_text, url)
                 await self.bot.send_message(
                     chat_id=self.channel_id,
                     text=message,
                     parse_mode='HTML',
-                    disable_web_page_preview=False
+                    disable_web_page_preview=True  # важный флаг против «мусора» из превью
                 )
-                logger.info(f"✅ Опубликовано: {title[:50]}...")
+                logger.info(f"✅ Опубликовано: {title[:60]}...")
                 self.save_hash(url, title)
-                
-                # Повышаем приоритет успешного источника
                 if source:
                     self.source_priority[source] = self.source_priority.get(source, 0) + 1
                     self.save_source_stats()
-                
                 return True
             except error.RetryAfter as e:
-                logger.warning(f"⚠️ Превышен лимит, ожидание {e.retry_after} сек...")
+                logger.warning(f"Rate limit, ждём {e.retry_after} сек...")
                 await asyncio.sleep(e.retry_after)
             except error.TimedOut:
-                logger.warning(f"⚠️ Таймаут при публикации, попытка {attempt + 1}/{max_retries}")
+                logger.warning(f"Таймаут при публикации, попытка {attempt + 1}/{max_retries}")
                 await asyncio.sleep(2 ** attempt)
             except Exception as e:
-                logger.error(f"❌ Ошибка при публикации '{title}' (попытка {attempt + 1}): {e}")
+                logger.error(f"❌ Ошибка публикации '{title}': {e}")
                 if attempt == max_retries - 1:
-                    # Отслеживаем неудачные публикации
                     if source:
-                        self.track_deleted_post(source)
+                        self.deleted_posts_tracker[source] = datetime.now()
+                        self.source_priority[source] = self.source_priority.get(source, 0) - 2
+                        self.save_source_stats()
                     return False
                 await asyncio.sleep(2 ** attempt)
-
         return False
 
+    # ---------- scheduling ----------
+
     def generate_post_schedule(self) -> List[datetime]:
-        """Генерирует расписание публикаций строго с 9:00 до 21:00 по Мск"""
         try:
-            moscow_tz = pytz.timezone('Europe/Moscow')
-            now_moscow = datetime.now(moscow_tz)
-            
-            # Определяем временное окно (9:00-21:00 по Мск)
+            msk = pytz.timezone('Europe/Moscow')
+            now = datetime.now(msk)
             start_hour, end_hour = 9, 21
-            
-            # Если сейчас вне рабочего времени, начинаем с 9:00 следующего дня
-            if now_moscow.hour < start_hour:
-                first_post_time = now_moscow.replace(
-                    hour=start_hour, minute=0, second=0, microsecond=0
-                )
-            elif now_moscow.hour >= end_hour:
-                first_post_time = now_moscow.replace(
-                    hour=start_hour, minute=0, second=0, microsecond=0
-                ) + timedelta(days=1)
+            if now.hour < start_hour:
+                base = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+            elif now.hour >= end_hour:
+                base = (now + timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
             else:
-                # Текущее время в рабочем окне
-                first_post_time = now_moscow
-            
-            # Генерируем времена публикаций
+                base = now
+
             times = []
-            available_minutes = (end_hour - start_hour) * 60
-            time_slots = MAX_POSTS_PER_DAY
-            
-            # Равномерно распределяем публикации в течение дня
-            for i in range(time_slots):
-                # Вычисляем позицию в минутном интервале
-                minute_position = available_minutes * (i + 1) / (time_slots + 1)
-                random_variation = random.uniform(-30, 30)  # ±30 минут вариация
-                
+            available = (end_hour - start_hour) * 60
+            slots = MAX_POSTS_PER_DAY
+            for i in range(slots):
+                minute_position = available * (i + 1) / (slots + 1)
+                random_variation = random.uniform(-25, 25)
                 total_minutes = minute_position + random_variation
-                hours_to_add = int(total_minutes // 60)
-                minutes_to_add = int(total_minutes % 60)
-                
-                post_time = first_post_time.replace(
-                    hour=start_hour + hours_to_add,
-                    minute=minutes_to_add,
-                    second=0,
-                    microsecond=0
-                )
-                
-                # Обеспечиваем, чтобы время было в пределах 9:00-21:00
-                if post_time.hour < start_hour:
-                    post_time = post_time.replace(hour=start_hour, minute=random.randint(0, 30))
-                elif post_time.hour >= end_hour:
-                    post_time = post_time.replace(hour=end_hour - 1, minute=random.randint(30, 59))
-                
-                times.append(post_time)
-            
+                h = int(total_minutes // 60)
+                m = int(total_minutes % 60)
+                t = base.replace(hour=start_hour + h, minute=m, second=0, microsecond=0)
+                if t.hour < start_hour:
+                    t = t.replace(hour=start_hour, minute=random.randint(0, 30))
+                elif t.hour >= end_hour:
+                    t = t.replace(hour=end_hour - 1, minute=random.randint(30, 59))
+                times.append(t)
             return sorted(times)
-            
         except Exception as e:
-            logger.error(f"Ошибка при генерации расписания: {e}")
-            # Резервное расписание на случай ошибки
+            logger.error(f"Ошибка расписания: {e}")
             return [datetime.now() + timedelta(minutes=30 * i) for i in range(MAX_POSTS_PER_DAY)]
 
-    def avoid_consecutive_sources(self, posts: List[Dict]) -> List[Dict]:
-        """Перемешивает посты, чтобы не было подряд из одного источника"""
-        if len(posts) < 2:
-            return posts
-        
-        # Группируем посты по источникам
-        posts_by_source = {}
-        for post in posts:
-            source = post["source"]
-            if source not in posts_by_source:
-                posts_by_source[source] = []
-            posts_by_source[source].append(post)
-        
-        # Сортируем источники по количеству постов
-        sorted_sources = sorted(posts_by_source.keys(), key=lambda x: len(posts_by_source[x]), reverse=True)
-        
-        result = []
-        while any(posts_by_source.values()):
-            for source in sorted_sources:
-                if posts_by_source[source]:
-                    # Берем пост из текущего источника
-                    post = posts_by_source[source].pop(0)
-                    result.append(post)
-                    
-                    # Проверяем, не идут ли два поста подряд из одного источника
-                    if len(result) >= 2 and result[-2]["source"] == result[-1]["source"]:
-                        # Если да, ищем пост из другого источника для вставки
-                        for other_source in sorted_sources:
-                            if other_source != source and posts_by_source[other_source]:
-                                insert_post = posts_by_source[other_source].pop(0)
-                                result.insert(-1, insert_post)
-                                break
-        
-        return result[:MAX_POSTS_PER_DAY]
+    # ---------- main ----------
 
     async def run(self):
-        """Основной цикл бота с улучшенной ротацией источников"""
-        connector = aiohttp.TCPConnector(limit=5, ttl_dns_cache=300)
+        connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
         timeout = aiohttp.ClientTimeout(total=20)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             self.session = session
 
-            all_news = []
-            seen_urls = set()
-
-            # Сначала пробуем основные источники
-            for source in RSS_SOURCES:
+            # Параллельно собираем новости
+            async def _fetch(url):
+                if url in self.failed_sources:
+                    return []
                 try:
-                    if source in self.failed_sources:
-                        continue
-
-                    news = await self.fetch_feed(source)
-                    for item in news:
-                        if item["url"] not in seen_urls:
-                            all_news.append(item)
-                            seen_urls.add(item["url"])
-                    await asyncio.sleep(2)  # Задержка между запросами
+                    return await self.fetch_feed(url)
                 except Exception as e:
-                    logger.error(f"Ошибка при обработке источника {source}: {e}")
-                    self.failed_sources.add(source)
+                    logger.error(f"Ошибка источника {url}: {e}")
+                    self.failed_sources.add(url)
+                    return []
 
-            # Если новостей мало, пробуем резервные источники
+            tasks = [_fetch(src) for src in RSS_SOURCES]
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+            all_news = [item for sub in results for item in sub]
+
             if len(all_news) < MAX_POSTS_PER_DAY:
-                logger.info("Пробуем резервные источники...")
-                for backup_source in BACKUP_SOURCES:
-                    try:
-                        if backup_source in self.failed_sources:
-                            continue
+                logger.info("Пробуем резервные источники…")
+                tasks_b = [_fetch(src) for src in BACKUP_SOURCES]
+                results_b = await asyncio.gather(*tasks_b, return_exceptions=False)
+                all_news.extend(item for sub in results_b for item in sub)
 
-                        news = await self.fetch_feed(backup_source)
-                        for item in news:
-                            if item["url"] not in seen_urls:
-                                all_news.append(item)
-                                seen_urls.add(item["url"])
-                        await asyncio.sleep(2)
-                    except Exception as e:
-                        logger.error(f"Ошибка при обработке резервного источника{backup_source}: {e}")
-                        self.failed_sources.add(backup_source)
+            # Фильтрация по тематике и длине
+            filtered = []
+            seen_urls = set()
+            for it in all_news:
+                url_c = canon_url(it["url"])
+                if url_c in seen_urls:
+                    continue
+                if (not self.is_duplicate(it["url"], it["title"])
+                    and self.is_finance_related(it["title"], it["content"])
+                    and len(self.clean_text(it["content"])) >= MIN_CONTENT_LENGTH):
+                    filtered.append(it)
+                    seen_urls.add(url_c)
 
-            # Фильтрация новостей
-            filtered_news = []
-            for item in all_news:
-                if (not self.is_duplicate(item["url"], item["title"]) and
-                    self.is_finance_related(item["title"], item["content"]) and
-                    len(self.clean_text(item["content"])) >= MIN_CONTENT_LENGTH):
-                    filtered_news.append(item)
-
-            # Приоритизация источников с учетом истории удалений
-            prioritized_news = self.prioritize_sources(filtered_news)
-
-            if not prioritized_news:
-                logger.info("Нет подходящих новостей для публикации.")
+            if not filtered:
+                logger.info("Нет подходящих новостей.")
                 return
 
-            # Избегаем последовательных публикаций из одного источника
-            final_news = self.avoid_consecutive_sources(prioritized_news)
+            # Справедливая ротация по доменам/источникам
+            final_news = self.select_news_fair(filtered, MAX_POSTS_PER_DAY)
 
-            # Генерируем расписание публикаций
+            if not final_news:
+                logger.info("Нечего публиковать после ротации.")
+                return
+
             schedule = self.generate_post_schedule()
-            
-            logger.info(f"Сгенерировано расписание на {len(schedule)} публикаций:")
-            for i, pub_time in enumerate(schedule, 1):
-                logger.info(f"  {i}. {pub_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"Сгенерировано расписание на {len(schedule)} публикаций.")
+            for i, t in enumerate(schedule, 1):
+                logger.info(f"  {i}. {t.strftime('%Y-%m-%d %H:%M:%S')} МСК")
 
-            # Публикуем новости по расписанию
             for i, (news_item, pub_time) in enumerate(zip(final_news, schedule)):
-                # Ждем до времени публикации
                 now = datetime.now(pytz.timezone('Europe/Moscow'))
                 if pub_time > now:
                     wait_seconds = (pub_time - now).total_seconds()
-                    logger.info(f"Ожидание до публикации {i+1}: {int(wait_seconds)} секунд")
+                    logger.info(f"Ожидание до публикации {i+1}: {int(wait_seconds)} сек")
                     await asyncio.sleep(wait_seconds)
 
-                # Публикуем новость
-                success = await self.publish_post(
+                ok = await self.publish_post(
                     title=news_item["title"],
                     content=news_item["content"],
                     url=news_item["url"],
-                    creator=news_item.get("creator", ""),
                     source=news_item["source"]
                 )
+                # записываем домен в историю ротации даже при неудаче — чтобы попытаться другой
+                self.recent_sources.append(news_item["domain"])
+                self.save_recent_sources()
 
-                if not success and i < len(final_news) - 1:
-                    logger.warning("Публикация не удалась, переходим к следующей новости")
-                    continue
+                if not ok and i < len(final_news) - 1:
+                    logger.warning("Публикация не удалась, переходим к следующей.")
 
-                # Пауза между публикациями (если есть еще новости)
                 if i < len(final_news) - 1:
-                    await asyncio.sleep(random.uniform(5, 15))
+                    await asyncio.sleep(random.uniform(5, 12))
 
-            logger.info("✅ Цикл публикаций завершен")
+            logger.info("✅ Цикл публикаций завершён.")
 
-            # Очистка списка неудачных источников раз в день
             if len(self.failed_sources) > 0 and datetime.now().hour == 0:
                 logger.info("Очистка списка неудачных источников")
                 self.failed_sources.clear()
 
 
 async def main():
-    """Главная функция запуска бота"""
     try:
         bot = NewsBot(BOT_TOKEN, CHANNEL_ID)
         await bot.run()
