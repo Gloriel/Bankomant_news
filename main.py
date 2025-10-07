@@ -42,7 +42,6 @@ RSS_SOURCES = [
     "https://arb.ru/rss/news/",
     "https://www.bfm.ru/news.rss?rubric=28",
     "https://ria.ru/export/rss2/archive/index.xml",
-    
 ]
 
 BACKUP_SOURCES = [
@@ -60,9 +59,9 @@ if not CHANNEL_ID:
 if CHANNEL_ID.lstrip('-').isdigit() and len(CHANNEL_ID.lstrip('-')) >= 10 and not CHANNEL_ID.startswith('-100'):
     CHANNEL_ID = '-100' + CHANNEL_ID.lstrip('-')
 
-MAX_POSTS_PER_DAY = 5  # Увеличено с 3 до 5
+MAX_POSTS_PER_DAY = 5
 MAX_CONTENT_LENGTH = 800
-MIN_CONTENT_LENGTH = 100  # Увеличено с 50 до 100 для лучшего качества
+MIN_CONTENT_LENGTH = 100
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36',
@@ -86,7 +85,6 @@ FINANCE_KEYWORDS = [
     'страхование', 'пенсионный', 'лизинг', 'факторинг'
 ]
 
-# Паттерны для исключения ложных срабатываний
 EXCLUDE_PATTERNS = [
     r'банкет', r'ставк[ауи]\s+на', r'кредит\s+довери', r'видео\s*ролик',
     r'фото\s*репортаж', r'галерея', r'анонс', r'трансляц', r'онлайн',
@@ -125,6 +123,14 @@ TOPIC_TO_EMOJI = {
 
 RUS_MONTHS = r'(январ[ья]|феврал[ья]|март[ае]?|апрел[ья]|ма[ея]|июн[ья]|июл[ья]|август[ае]?|сентябр[ья]|октябр[ья]|ноябр[ья]|декабр[ья])'
 
+# Универсальные селекторы для всех сайтов
+UNIVERSAL_SELECTORS = [
+    '.article-content', '.post-content', '.entry-content', 
+    '.article__body', '.article-body', 'article', '.content',
+    '.news-text', '.news-content', '.text', '.story__content',
+    '.article-text', '.post-body', '.entry-body'
+]
+
 # ===================== UTILS =====================
 
 def canon_url(url: str) -> str:
@@ -148,10 +154,8 @@ def normalize_title(title: str) -> str:
     """Убираем даты/хвосты из заголовка."""
     if not title:
         return ""
-    # 12 мая 2025, 12 мая 2025 г., 12.05.2025 и т.п.
     title = re.sub(rf'\b\d{{1,2}}\s+{RUS_MONTHS}\s+\d{{4}}\s*г?\.?,?\s*', ' ', title, flags=re.IGNORECASE)
     title = re.sub(r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b', ' ', title)
-    # Хвосты вида "— Ведомости", "- РИА Новости"
     title = re.sub(r'\s*[-—–]\s*[^\n]+$', '', title).strip()
     return re.sub(r'\s+', ' ', title).strip()
 
@@ -160,9 +164,9 @@ def strip_byline_dates_everywhere(text: str) -> str:
     if not text:
         return ""
     patterns = [
-        rf'\b\d{{1,2}}\s+{RUS_MONTHS}\s+\d{{4}}\b',      # 12 мая 2025
-        r'\b\d{1,2}[:.]\d{2}\b',                         # 12:34
-        r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b',         # 12.05.2025
+        rf'\b\d{{1,2}}\s+{RUS_MONTHS}\s+\d{{4}}\b',
+        r'\b\d{1,2}[:.]\d{2}\b',
+        r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b',
         r'(?:Автор|Корреспондент|Редакция|Источник|Фото|Иллюстрация)\s*:\s*[^\n]+',
         r'Читайте также[^\n]*',
         r'Подпис(ывайтесь|ка)[^\n]*',
@@ -192,8 +196,7 @@ class NewsBot:
         self.deleted_posts_tracker: Dict[str, datetime] = {}
         self.last_publication_time: Optional[datetime] = None
 
-        # ротация по источникам между циклами
-        self.recent_sources: deque[str] = deque(maxlen=15)  # Увеличено для 5 постов
+        self.recent_sources: deque[str] = deque(maxlen=15)
 
         self.load_hashes()
         self.load_source_stats()
@@ -284,16 +287,13 @@ class NewsBot:
         """Рассчитывает баллы финансовой тематики (0-10+)"""
         text = f"{title} {content}".lower()
         
-        # Исключаем ложные срабатывания
         for pattern in EXCLUDE_PATTERNS:
             if re.search(pattern, text, re.IGNORECASE):
                 return 0
         
-        # Считаем настоящие финансовые термины
         score = 0
         for kw in FINANCE_KEYWORDS:
             if kw in text:
-                # Важные термины дают больше баллов
                 if kw in ['банк', 'кредит', 'ипотека', 'ставка', 'цб', 'инфляция']:
                     score += 2
                 else:
@@ -304,7 +304,7 @@ class NewsBot:
     def is_finance_related(self, title: str, content: str) -> bool:
         """Улучшенная проверка финансовой тематики"""
         score = self.calculate_finance_score(title, content)
-        return score >= 3  # Минимум 3 балла для прохождения
+        return score >= 3
 
     @staticmethod
     def clean_text(text: str) -> str:
@@ -348,66 +348,56 @@ class NewsBot:
         return "📰"
 
     async def fetch_full_article_text(self, url: str) -> str:
-        max_retries = 3
+        """Упрощенный парсинг с универсальными селекторами"""
+        max_retries = 2  # Уменьшили количество попыток
         u = canon_url(url)
+        
         for attempt in range(max_retries):
             try:
                 headers = HEADERS.copy()
                 headers['User-Agent'] = random.choice(USER_AGENTS)
-                async with self.session.get(u, headers=headers, timeout=15) as resp:
+                async with self.session.get(u, headers=headers, timeout=10) as resp:  # Уменьшили таймаут
                     if resp.status != 200:
-                        logger.warning(f"Не удалось загрузить {u}: {resp.status}")
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                         continue
                     html_text = await resp.text()
                     soup = BeautifulSoup(html_text, "html.parser")
+                    
+                    # Удаляем ненужные элементы
                     for elem in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside', 'advertisement', 'iframe', 'form']):
                         elem.decompose()
+                    
                     for ad in soup.find_all(class_=lambda x: x and any(w in str(x).lower() for w in ['ad', 'banner', 'promo', 'recommended', 'social', 'share'])):
                         ad.decompose()
 
-                    dom = domain_of(u)
-                    selectors = []
-                    if "finam.ru" in dom:
-                        selectors = ['.article__body', '.content', 'article']
-                    elif "cbr.ru" in dom:
-                        selectors = ['.content', '.text', 'article']
-                    elif "vedomosti.ru" in dom:
-                        selectors = ['.article__body', '.article-body', 'article']
-                    elif "arb.ru" in dom:
-                        selectors = ['.news-detail', '.content', 'article']
-                    elif "kommersant.ru" in dom or "rbc.ru" in dom or "banki.ru" in dom:
-                        selectors = ['.article__text', '.article__content', '.news-text', '.article-content', 'article']
-                    else:
-                        selectors = ['.article-content', '.post-content', '.entry-content', '.article__body', '.article-body', 'article', '.content']
-
+                    # Используем универсальные селекторы
                     content = None
-                    for sel in selectors:
+                    for sel in UNIVERSAL_SELECTORS:
                         try:
                             if sel.startswith('.'):
                                 content = soup.find(class_=sel[1:])
-                            elif sel.startswith('#'):
-                                content = soup.find(id=sel[1:])
                             else:
                                 content = soup.find(sel)
                             if content:
                                 break
                         except Exception:
                             continue
+                    
                     if not content:
                         all_text = soup.get_text(" ")
                         return self.clean_text(all_text)
+                    
                     return self.clean_text(content.get_text(" "))
 
-            except asyncio.TimeoutError:
-                logger.warning(f"Таймаут при парсинге {u}, попытка {attempt + 1}")
+            except (asyncio.TimeoutError, aiohttp.ClientError):
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
             except Exception as e:
-                logger.error(f"Ошибка при парсинге {u}: {e}, попытка {attempt + 1}")
+                logger.error(f"Ошибка при парсинге {u}: {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
+        
         return ""
 
     def smart_truncate(self, text: str, max_length: int = MAX_CONTENT_LENGTH) -> str:
@@ -427,21 +417,25 @@ class NewsBot:
             full_text = full_text[len(title):].lstrip(":.- ")
         truncated = self.smart_truncate(full_text, MAX_CONTENT_LENGTH)
 
-        # Делим на 1–2 предложения в абзаце
+        # Упрощенное форматирование абзацев
         sentences = re.split(r'(?<=[.!?])\s+', truncated)
-        paragraphs, buf = [], ""
-        for s in sentences:
-            if not buf:
-                buf = s
-            elif len(re.findall(r'[.!?]', buf)) < 2:
-                buf += " " + s
+        paragraphs = []
+        current_para = ""
+        
+        for sentence in sentences:
+            if not current_para:
+                current_para = sentence
+            elif len(current_para + " " + sentence) < 150:  # Ограничение длины абзаца
+                current_para += " " + sentence
             else:
-                paragraphs.append(buf.strip())
-                buf = s
-        if buf:
-            paragraphs.append(buf.strip())
-        formatted = "\n\n".join(p for p in paragraphs if len(p) > 20)
+                if len(current_para) > 30:  # Минимальная длина абзаца
+                    paragraphs.append(current_para.strip())
+                current_para = sentence
+        
+        if current_para and len(current_para) > 30:
+            paragraphs.append(current_para.strip())
 
+        formatted = "\n\n".join(paragraphs)
         hashtags = self.extract_hashtags(title, content)
         hashtag_line = "\n\n" + " ".join(hashtags) if hashtags else ""
         emoji = self.get_relevant_emoji(title, content)
@@ -452,6 +446,7 @@ class NewsBot:
             f"👉 <a href='{html.escape(canon_url(url))}'>Читать далее</a>"
             f"{hashtag_line}"
         )
+        
         if len(message) > 3900:
             message = message[:3897] + "..."
         return message
@@ -459,75 +454,73 @@ class NewsBot:
     # ---------- fetching ----------
 
     async def fetch_feed(self, url: str) -> List[Dict]:
-        max_retries = 3
+        max_retries = 2
         for attempt in range(max_retries):
             try:
                 headers = HEADERS.copy()
                 headers['User-Agent'] = random.choice(USER_AGENTS)
-                async with self.session.get(url, headers=headers, timeout=15) as response:
+                async with self.session.get(url, headers=headers, timeout=10) as response:
                     if response.status != 200:
-                        logger.warning(f"HTTP {response.status} на {url}")
                         self.failed_sources.add(url)
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt)
                         continue
+                    
                     content = await response.text()
                     feed = await asyncio.to_thread(feedparser.parse, content)
                     entries = []
+                    
                     for entry in feed.entries:
                         title = (entry.get("title") or "").strip()
                         if not title:
                             continue
                         if "видео" in title.lower() or "video" in title.lower():
                             continue
+                            
                         title = normalize_title(title)
                         link = canon_url((entry.get("link") or "").strip())
                         description = entry.get("description", "") or entry.get("summary", "") or ""
+                        
                         if "<![CDATA[" in description:
                             description = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', description, flags=re.DOTALL)
 
                         soup_desc = BeautifulSoup(description, "html.parser")
                         description = strip_byline_dates_everywhere(soup_desc.get_text(" "))
 
-                        # Авторов и метки — не используем в выводе, чтобы не «засорять»
-                        creator = ""
-
-                        # Улучшенная проверка тематики при парсинге
                         if title and link:
                             finance_score = self.calculate_finance_score(title, description)
-                            if finance_score >= 2:  # Минимум 2 балла на этапе парсинга
+                            if finance_score >= 2:
                                 entries.append({
                                     "title": title,
                                     "url": link,
                                     "content": description,
-                                    "creator": creator,
                                     "source": url,
                                     "domain": domain_of(link),
-                                    "finance_score": finance_score  # Добавляем оценку
+                                    "finance_score": finance_score
                                 })
-                    logger.info(f"{urlparse(url).netloc}: {len(entries)} новостей (фильтр: финансы)")
+                    
+                    logger.info(f"{urlparse(url).netloc}: {len(entries)} новостей")
                     return entries
-            except asyncio.TimeoutError:
-                logger.warning(f"Таймаут RSS {url}, попытка {attempt + 1}")
+                    
+            except (asyncio.TimeoutError, aiohttp.ClientError):
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
             except Exception as e:
-                logger.error(f"Ошибка RSS {url}: {e}, попытка {attempt + 1}")
+                logger.error(f"Ошибка RSS {url}: {e}")
                 self.failed_sources.add(url)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
+        
         return []
 
     # ---------- selection & rotation ----------
 
     def select_news_fair(self, news_items: List[Dict], k: int) -> List[Dict]:
-        """
-        Улучшенный справедливый отбор по источникам с учетом качества контента.
-        """
+        """Упрощенный отбор с ротацией источников"""
         if not news_items:
             return []
 
-        # Уберём явные дубликаты по (url,title)
+        # Убираем дубликаты
         uniq = {}
         for n in news_items:
             key = (canon_url(n["url"]), normalize_title(n["title"]).lower())
@@ -535,46 +528,32 @@ class NewsBot:
                 uniq[key] = n
         items = list(uniq.values())
 
-        # Сортируем по финансовому score (качество)
+        # Сортируем по качеству
         items.sort(key=lambda x: x.get("finance_score", 0), reverse=True)
 
         recent = set(self.recent_sources)
-        first_pass = [n for n in items if n["domain"] not in recent]
-        second_pass = [n for n in items if n["domain"] in recent]
-
-        result: List[Dict] = []
-        used_domains: Set[str] = set()
-
-        def take_from(bucket: List[Dict]):
-            nonlocal result, used_domains
-            for n in bucket:
-                if len(result) >= k:
-                    break
-                d = n["domain"]
-                # Не ставим подряд одинаковые домены и ограничиваем разнообразие
-                if (not result or result[-1]["domain"] != d) and (len(used_domains) < 4 or d not in used_domains):
-                    result.append(n)
-                    used_domains.add(d)
+        result = []
+        used_domains = set()
 
         # Сначала берем из новых доменов
-        take_from(first_pass)
-        
-        # Затем добираем из уже использованных, но с чередованием
-        if len(result) < k:
-            take_from(second_pass)
+        for item in items:
+            if len(result) >= k:
+                break
+            if item["domain"] not in recent and item["domain"] not in used_domains:
+                result.append(item)
+                used_domains.add(item["domain"])
 
-        # Если всё ещё не хватает - добираем лучшими по качеству
-        if len(result) < k:
-            leftovers = [n for n in items if n not in result]
-            for n in leftovers:
-                if len(result) >= k:
-                    break
-                if not result or result[-1]["domain"] != n["domain"]:
-                    result.append(n)
+        # Затем добираем из остальных
+        for item in items:
+            if len(result) >= k:
+                break
+            if item not in result and (not result or result[-1]["domain"] != item["domain"]):
+                result.append(item)
+                used_domains.add(item["domain"])
 
-        # Обновим недавние источники
-        for n in result:
-            self.recent_sources.append(n["domain"])
+        # Обновляем историю источников
+        for item in result:
+            self.recent_sources.append(item["domain"])
         self.save_recent_sources()
 
         logger.info(f"Отобрано {len(result)} новостей из {len(used_domains)} источников")
@@ -587,7 +566,6 @@ class NewsBot:
             logger.info(f"Пропущено (дубликат): {title[:60]}...")
             return False
         
-        # Усиленная проверка тематики перед публикацией
         if not self.is_finance_related(title, content):
             logger.info(f"Пропущено (не финтематика): {title[:60]}...")
             return False
@@ -595,11 +573,12 @@ class NewsBot:
         full_text = await self.fetch_full_article_text(url)
         use_text = full_text if full_text.strip() else content
         cleaned = self.clean_text(use_text)
+        
         if len(cleaned) < MIN_CONTENT_LENGTH:
             logger.info(f"Пропущено (мало текста {len(cleaned)} < {MIN_CONTENT_LENGTH}): {title[:60]}...")
             return False
 
-        max_retries = 3
+        max_retries = 2
         for attempt in range(max_retries):
             try:
                 message = self.format_message(title, use_text, url)
@@ -615,131 +594,118 @@ class NewsBot:
                     self.source_priority[source] = self.source_priority.get(source, 0) + 1
                     self.save_source_stats()
                 return True
+                
             except error.RetryAfter as e:
                 logger.warning(f"Rate limit, ждём {e.retry_after} сек...")
                 await asyncio.sleep(e.retry_after)
-            except error.TimedOut:
-                logger.warning(f"Таймаут при публикации, попытка {attempt + 1}/{max_retries}")
-                await asyncio.sleep(2 ** attempt)
             except Exception as e:
-                logger.error(f"❌ Ошибка публикации '{title}': {e}")
+                logger.error(f"Ошибка публикации '{title}': {e}")
                 if attempt == max_retries - 1:
                     if source:
                         self.deleted_posts_tracker[source] = datetime.now()
-                        self.source_priority[source] = self.source_priority.get(source, 0) - 2
+                        self.source_priority[source] = self.source_priority.get(source, 0) - 1
                         self.save_source_stats()
                     return False
                 await asyncio.sleep(2 ** attempt)
+        
         return False
 
     # ---------- scheduling ----------
 
     def generate_post_schedule(self) -> List[datetime]:
-        """Генерирует 5 случайных времен публикации с 8:00 до 20:00 по МСК"""
+        """Генерирует 5 случайных времен с 8:00 до 20:00 по МСК"""
         try:
             msk = pytz.timezone('Europe/Moscow')
             now = datetime.now(msk)
             
-            # Определяем базовую дату (сегодня или завтра)
-            start_hour, end_hour = 8, 20  # С 8:00 до 20:00
+            start_hour, end_hour = 8, 20
+            base_date = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
             
-            if now.hour < start_hour:
-                base_date = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-            elif now.hour >= end_hour:
+            if now.hour >= end_hour:
                 base_date = (now + timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
-            else:
-                base_date = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-                # Если уже после 8 утра, но до 20 вечера, планируем на сегодня
 
             times = []
-            available_minutes = (end_hour - start_hour) * 60
-            
-            # Генерируем 5 случайных времен в пределах дня
             for _ in range(MAX_POSTS_PER_DAY):
-                # Случайная минута в пределах рабочего дня
-                random_minute = random.randint(0, available_minutes - 1)
-                hour = start_hour + random_minute // 60
-                minute = random_minute % 60
-                
-                pub_time = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                # Случайное время в рабочем интервале
+                random_hour = random.randint(start_hour, end_hour - 1)
+                random_minute = random.randint(0, 59)
+                pub_time = base_date.replace(hour=random_hour, minute=random_minute)
                 times.append(pub_time)
             
-            # Сортируем по времени
+            # Сортируем и фильтруем будущие времена
             times.sort()
-            
-            # Проверяем, что все времена в будущем
             future_times = [t for t in times if t > now]
-            if len(future_times) < MAX_POSTS_PER_DAY:
-                # Если некоторые времена уже прошли, добавляем дополнительные
-                additional_needed = MAX_POSTS_PER_DAY - len(future_times)
-                for i in range(additional_needed):
-                    extra_minutes = random.randint(10, available_minutes)
-                    extra_time = now + timedelta(minutes=extra_minutes)
-                    # Убедимся, что время в пределах рабочего дня
-                    if extra_time.hour >= end_hour:
-                        extra_time = extra_time.replace(hour=end_hour-1, minute=random.randint(0, 59))
-                    future_times.append(extra_time)
-                future_times.sort()
             
-            return future_times[:MAX_POSTS_PER_DAY]
+            # Если нужно больше времен - добавляем
+            while len(future_times) < MAX_POSTS_PER_DAY:
+                extra_minutes = random.randint(30, 180)
+                extra_time = now + timedelta(minutes=extra_minutes)
+                if extra_time.hour < end_hour:
+                    future_times.append(extra_time)
+            
+            return sorted(future_times)[:MAX_POSTS_PER_DAY]
             
         except Exception as e:
             logger.error(f"Ошибка генерации расписания: {e}")
-            # Резервный вариант: равномерное распределение
+            # Простой fallback
             msk = pytz.timezone('Europe/Moscow')
             base_time = datetime.now(msk)
-            return [base_time + timedelta(hours=i) for i in range(MAX_POSTS_PER_DAY)]
+            return [base_time + timedelta(minutes=30 * i) for i in range(MAX_POSTS_PER_DAY)]
 
     # ---------- main ----------
 
     async def run(self):
-        connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
-        timeout = aiohttp.ClientTimeout(total=20)
+        connector = aiohttp.TCPConnector(limit=8, ttl_dns_cache=300)  # Уменьшили лимит
+        timeout = aiohttp.ClientTimeout(total=15)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             self.session = session
 
-            # Параллельно собираем новости
-            async def _fetch(url):
+            # Параллельный сбор новостей
+            async def fetch_single_source(url):
                 if url in self.failed_sources:
                     return []
                 try:
                     return await self.fetch_feed(url)
-                except Exception as e:
-                    logger.error(f"Ошибка источника {url}: {e}")
+                except Exception:
                     self.failed_sources.add(url)
                     return []
 
-            tasks = [_fetch(src) for src in RSS_SOURCES]
-            results = await asyncio.gather(*tasks, return_exceptions=False)
-            all_news = [item for sub in results for item in sub]
+            # Основные источники
+            tasks = [fetch_single_source(src) for src in RSS_SOURCES]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            all_news = []
+            for result in results:
+                if isinstance(result, list):
+                    all_news.extend(result)
 
+            # Резервные источники если нужно
             if len(all_news) < MAX_POSTS_PER_DAY:
-                logger.info("Пробуем резервные источники…")
-                tasks_b = [_fetch(src) for src in BACKUP_SOURCES]
-                results_b = await asyncio.gather(*tasks_b, return_exceptions=False)
-                all_news.extend(item for sub in results_b for item in sub)
+                backup_tasks = [fetch_single_source(src) for src in BACKUP_SOURCES]
+                backup_results = await asyncio.gather(*backup_tasks, return_exceptions=True)
+                for result in backup_results:
+                    if isinstance(result, list):
+                        all_news.extend(result)
 
-            # Фильтрация по тематике и длине
+            # Фильтрация
             filtered = []
             seen_urls = set()
-            for it in all_news:
-                url_c = canon_url(it["url"])
-                if url_c in seen_urls:
-                    continue
-                if (not self.is_duplicate(it["url"], it["title"])
-                    and self.is_finance_related(it["title"], it["content"])
-                    and len(self.clean_text(it["content"])) >= MIN_CONTENT_LENGTH):
-                    filtered.append(it)
+            for item in all_news:
+                url_c = canon_url(item["url"])
+                if (url_c not in seen_urls and 
+                    not self.is_duplicate(item["url"], item["title"]) and
+                    self.is_finance_related(item["title"], item["content"]) and
+                    len(self.clean_text(item["content"])) >= MIN_CONTENT_LENGTH):
+                    filtered.append(item)
                     seen_urls.add(url_c)
 
             if not filtered:
                 logger.info("Нет подходящих новостей.")
                 return
 
-            logger.info(f"После фильтрации осталось {len(filtered)} новостей")
+            logger.info(f"После фильтрации: {len(filtered)} новостей")
 
-            # Справедливая ротация по доменам/источникам
+            # Отбор и ротация
             final_news = self.select_news_fair(filtered, MAX_POSTS_PER_DAY)
 
             if not final_news:
@@ -747,39 +713,34 @@ class NewsBot:
                 return
 
             schedule = self.generate_post_schedule()
-            logger.info(f"Сгенерировано расписание на {len(schedule)} публикаций с 8:00 до 20:00 МСК:")
+            logger.info(f"Расписание на {len(schedule)} публикаций:")
             for i, t in enumerate(schedule, 1):
-                logger.info(f"  {i}. {t.strftime('%Y-%m-%d %H:%M:%S')} МСК")
+                logger.info(f"  {i}. {t.strftime('%H:%M')} МСК")
 
+            # Публикация по расписанию
             for i, (news_item, pub_time) in enumerate(zip(final_news, schedule)):
                 msk = pytz.timezone('Europe/Moscow')
                 now = datetime.now(msk)
+                
                 if pub_time > now:
                     wait_seconds = (pub_time - now).total_seconds()
-                    logger.info(f"Ожидание до публикации {i+1}: {int(wait_seconds)} сек")
+                    logger.info(f"Ожидание публикации {i+1}: {int(wait_seconds)} сек")
                     await asyncio.sleep(wait_seconds)
 
-                ok = await self.publish_post(
+                success = await self.publish_post(
                     title=news_item["title"],
                     content=news_item["content"],
                     url=news_item["url"],
                     source=news_item["source"]
                 )
-                # записываем домен в историю ротации даже при неудаче — чтобы попытаться другой
+                
                 self.recent_sources.append(news_item["domain"])
                 self.save_recent_sources()
 
-                if not ok and i < len(final_news) - 1:
-                    logger.warning("Публикация не удалась, переходим к следующей.")
-
                 if i < len(final_news) - 1:
-                    await asyncio.sleep(random.uniform(5, 12))
+                    await asyncio.sleep(random.uniform(3, 8))
 
             logger.info("✅ Цикл публикаций завершён.")
-
-            if len(self.failed_sources) > 0 and datetime.now().hour == 0:
-                logger.info("Очистка списка неудачных источников")
-                self.failed_sources.clear()
 
 
 async def main():
