@@ -42,7 +42,7 @@ RSS_SOURCES = [
     "https://arb.ru/rss/news/",
     "https://www.bfm.ru/news.rss?rubric=28",
     "https://ria.ru/export/rss2/archive/index.xml",
-    "https://www.vestifinance.ru/rss/news",
+    
 ]
 
 BACKUP_SOURCES = [
@@ -60,9 +60,9 @@ if not CHANNEL_ID:
 if CHANNEL_ID.lstrip('-').isdigit() and len(CHANNEL_ID.lstrip('-')) >= 10 and not CHANNEL_ID.startswith('-100'):
     CHANNEL_ID = '-100' + CHANNEL_ID.lstrip('-')
 
-MAX_POSTS_PER_DAY = 3
+MAX_POSTS_PER_DAY = 5  # Увеличено с 3 до 5
 MAX_CONTENT_LENGTH = 800
-MIN_CONTENT_LENGTH = 50
+MIN_CONTENT_LENGTH = 100  # Увеличено с 50 до 100 для лучшего качества
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36',
@@ -84,6 +84,13 @@ FINANCE_KEYWORDS = [
     'санация', 'банкротство', 'форекс', 'инвестор', 'портфель', 'риск', 'доходность',
     'процент', 'ключевая ставка', 'монетарный', 'фискальный', 'бюджет', 'налог', 'тариф',
     'страхование', 'пенсионный', 'лизинг', 'факторинг'
+]
+
+# Паттерны для исключения ложных срабатываний
+EXCLUDE_PATTERNS = [
+    r'банкет', r'ставк[ауи]\s+на', r'кредит\s+довери', r'видео\s*ролик',
+    r'фото\s*репортаж', r'галерея', r'анонс', r'трансляц', r'онлайн',
+    r'блог', r'мнение', r'комментарий', r'опрос', r'рейтинг'
 ]
 
 KEYWORDS_TO_HASHTAGS = {
@@ -186,7 +193,7 @@ class NewsBot:
         self.last_publication_time: Optional[datetime] = None
 
         # ротация по источникам между циклами
-        self.recent_sources: deque[str] = deque(maxlen=12)
+        self.recent_sources: deque[str] = deque(maxlen=15)  # Увеличено для 5 постов
 
         self.load_hashes()
         self.load_source_stats()
@@ -273,9 +280,31 @@ class NewsBot:
 
     # ---------- quality ----------
 
-    def is_finance_related(self, title: str, content: str) -> bool:
+    def calculate_finance_score(self, title: str, content: str) -> int:
+        """Рассчитывает баллы финансовой тематики (0-10+)"""
         text = f"{title} {content}".lower()
-        return any(kw in text for kw in FINANCE_KEYWORDS)
+        
+        # Исключаем ложные срабатывания
+        for pattern in EXCLUDE_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return 0
+        
+        # Считаем настоящие финансовые термины
+        score = 0
+        for kw in FINANCE_KEYWORDS:
+            if kw in text:
+                # Важные термины дают больше баллов
+                if kw in ['банк', 'кредит', 'ипотека', 'ставка', 'цб', 'инфляция']:
+                    score += 2
+                else:
+                    score += 1
+        
+        return score
+
+    def is_finance_related(self, title: str, content: str) -> bool:
+        """Улучшенная проверка финансовой тематики"""
+        score = self.calculate_finance_score(title, content)
+        return score >= 3  # Минимум 3 балла для прохождения
 
     @staticmethod
     def clean_text(text: str) -> str:
@@ -463,16 +492,20 @@ class NewsBot:
                         # Авторов и метки — не используем в выводе, чтобы не «засорять»
                         creator = ""
 
-                        if title and link and self.is_finance_related(title, description):
-                            entries.append({
-                                "title": title,
-                                "url": link,
-                                "content": description,
-                                "creator": creator,
-                                "source": url,
-                                "domain": domain_of(link),
-                            })
-                    logger.info(f"{urlparse(url).netloc}: {len(entries)} новостей")
+                        # Улучшенная проверка тематики при парсинге
+                        if title and link:
+                            finance_score = self.calculate_finance_score(title, description)
+                            if finance_score >= 2:  # Минимум 2 балла на этапе парсинга
+                                entries.append({
+                                    "title": title,
+                                    "url": link,
+                                    "content": description,
+                                    "creator": creator,
+                                    "source": url,
+                                    "domain": domain_of(link),
+                                    "finance_score": finance_score  # Добавляем оценку
+                                })
+                    logger.info(f"{urlparse(url).netloc}: {len(entries)} новостей (фильтр: финансы)")
                     return entries
             except asyncio.TimeoutError:
                 logger.warning(f"Таймаут RSS {url}, попытка {attempt + 1}")
@@ -489,9 +522,7 @@ class NewsBot:
 
     def select_news_fair(self, news_items: List[Dict], k: int) -> List[Dict]:
         """
-        Справедливый отбор по источникам/доменам:
-        1) Сначала берём новости из доменов, которых нет в recent_sources.
-        2) Затем — заполняем остаток, избегая подряд одинаковых доменов.
+        Улучшенный справедливый отбор по источникам с учетом качества контента.
         """
         if not news_items:
             return []
@@ -504,8 +535,8 @@ class NewsBot:
                 uniq[key] = n
         items = list(uniq.values())
 
-        # Сортируем по времени появления в сборке (как пришли) — можно перемешать
-        random.shuffle(items)
+        # Сортируем по финансовому score (качество)
+        items.sort(key=lambda x: x.get("finance_score", 0), reverse=True)
 
         recent = set(self.recent_sources)
         first_pass = [n for n in items if n["domain"] not in recent]
@@ -520,16 +551,19 @@ class NewsBot:
                 if len(result) >= k:
                     break
                 d = n["domain"]
-                if result and result[-1]["domain"] == d:
-                    continue  # не ставим подряд
-                result.append(n)
-                used_domains.add(d)
+                # Не ставим подряд одинаковые домены и ограничиваем разнообразие
+                if (not result or result[-1]["domain"] != d) and (len(used_domains) < 4 or d not in used_domains):
+                    result.append(n)
+                    used_domains.add(d)
 
+        # Сначала берем из новых доменов
         take_from(first_pass)
+        
+        # Затем добираем из уже использованных, но с чередованием
         if len(result) < k:
             take_from(second_pass)
 
-        # если всё ещё не хватает — добираем чем есть, аккуратно чередуя
+        # Если всё ещё не хватает - добираем лучшими по качеству
         if len(result) < k:
             leftovers = [n for n in items if n not in result]
             for n in leftovers:
@@ -538,11 +572,12 @@ class NewsBot:
                 if not result or result[-1]["domain"] != n["domain"]:
                     result.append(n)
 
-        # обновим недавние источники
+        # Обновим недавние источники
         for n in result:
             self.recent_sources.append(n["domain"])
         self.save_recent_sources()
 
+        logger.info(f"Отобрано {len(result)} новостей из {len(used_domains)} источников")
         return result[:k]
 
     # ---------- publish ----------
@@ -551,6 +586,8 @@ class NewsBot:
         if self.is_duplicate(url, title):
             logger.info(f"Пропущено (дубликат): {title[:60]}...")
             return False
+        
+        # Усиленная проверка тематики перед публикацией
         if not self.is_finance_related(title, content):
             logger.info(f"Пропущено (не финтематика): {title[:60]}...")
             return False
@@ -559,7 +596,7 @@ class NewsBot:
         use_text = full_text if full_text.strip() else content
         cleaned = self.clean_text(use_text)
         if len(cleaned) < MIN_CONTENT_LENGTH:
-            logger.info(f"Пропущено (мало текста): {title[:60]}...")
+            logger.info(f"Пропущено (мало текста {len(cleaned)} < {MIN_CONTENT_LENGTH}): {title[:60]}...")
             return False
 
         max_retries = 3
@@ -570,7 +607,7 @@ class NewsBot:
                     chat_id=self.channel_id,
                     text=message,
                     parse_mode='HTML',
-                    disable_web_page_preview=True  # важный флаг против «мусора» из превью
+                    disable_web_page_preview=True
                 )
                 logger.info(f"✅ Опубликовано: {title[:60]}...")
                 self.save_hash(url, title)
@@ -598,36 +635,60 @@ class NewsBot:
     # ---------- scheduling ----------
 
     def generate_post_schedule(self) -> List[datetime]:
+        """Генерирует 5 случайных времен публикации с 8:00 до 20:00 по МСК"""
         try:
             msk = pytz.timezone('Europe/Moscow')
             now = datetime.now(msk)
-            start_hour, end_hour = 9, 21
+            
+            # Определяем базовую дату (сегодня или завтра)
+            start_hour, end_hour = 8, 20  # С 8:00 до 20:00
+            
             if now.hour < start_hour:
-                base = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+                base_date = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
             elif now.hour >= end_hour:
-                base = (now + timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+                base_date = (now + timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
             else:
-                base = now
+                base_date = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+                # Если уже после 8 утра, но до 20 вечера, планируем на сегодня
 
             times = []
-            available = (end_hour - start_hour) * 60
-            slots = MAX_POSTS_PER_DAY
-            for i in range(slots):
-                minute_position = available * (i + 1) / (slots + 1)
-                random_variation = random.uniform(-25, 25)
-                total_minutes = minute_position + random_variation
-                h = int(total_minutes // 60)
-                m = int(total_minutes % 60)
-                t = base.replace(hour=start_hour + h, minute=m, second=0, microsecond=0)
-                if t.hour < start_hour:
-                    t = t.replace(hour=start_hour, minute=random.randint(0, 30))
-                elif t.hour >= end_hour:
-                    t = t.replace(hour=end_hour - 1, minute=random.randint(30, 59))
-                times.append(t)
-            return sorted(times)
+            available_minutes = (end_hour - start_hour) * 60
+            
+            # Генерируем 5 случайных времен в пределах дня
+            for _ in range(MAX_POSTS_PER_DAY):
+                # Случайная минута в пределах рабочего дня
+                random_minute = random.randint(0, available_minutes - 1)
+                hour = start_hour + random_minute // 60
+                minute = random_minute % 60
+                
+                pub_time = base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                times.append(pub_time)
+            
+            # Сортируем по времени
+            times.sort()
+            
+            # Проверяем, что все времена в будущем
+            future_times = [t for t in times if t > now]
+            if len(future_times) < MAX_POSTS_PER_DAY:
+                # Если некоторые времена уже прошли, добавляем дополнительные
+                additional_needed = MAX_POSTS_PER_DAY - len(future_times)
+                for i in range(additional_needed):
+                    extra_minutes = random.randint(10, available_minutes)
+                    extra_time = now + timedelta(minutes=extra_minutes)
+                    # Убедимся, что время в пределах рабочего дня
+                    if extra_time.hour >= end_hour:
+                        extra_time = extra_time.replace(hour=end_hour-1, minute=random.randint(0, 59))
+                    future_times.append(extra_time)
+                future_times.sort()
+            
+            return future_times[:MAX_POSTS_PER_DAY]
+            
         except Exception as e:
-            logger.error(f"Ошибка расписания: {e}")
-            return [datetime.now() + timedelta(minutes=30 * i) for i in range(MAX_POSTS_PER_DAY)]
+            logger.error(f"Ошибка генерации расписания: {e}")
+            # Резервный вариант: равномерное распределение
+            msk = pytz.timezone('Europe/Moscow')
+            base_time = datetime.now(msk)
+            return [base_time + timedelta(hours=i) for i in range(MAX_POSTS_PER_DAY)]
 
     # ---------- main ----------
 
@@ -676,6 +737,8 @@ class NewsBot:
                 logger.info("Нет подходящих новостей.")
                 return
 
+            logger.info(f"После фильтрации осталось {len(filtered)} новостей")
+
             # Справедливая ротация по доменам/источникам
             final_news = self.select_news_fair(filtered, MAX_POSTS_PER_DAY)
 
@@ -684,12 +747,13 @@ class NewsBot:
                 return
 
             schedule = self.generate_post_schedule()
-            logger.info(f"Сгенерировано расписание на {len(schedule)} публикаций.")
+            logger.info(f"Сгенерировано расписание на {len(schedule)} публикаций с 8:00 до 20:00 МСК:")
             for i, t in enumerate(schedule, 1):
                 logger.info(f"  {i}. {t.strftime('%Y-%m-%d %H:%M:%S')} МСК")
 
             for i, (news_item, pub_time) in enumerate(zip(final_news, schedule)):
-                now = datetime.now(pytz.timezone('Europe/Moscow'))
+                msk = pytz.timezone('Europe/Moscow')
+                now = datetime.now(msk)
                 if pub_time > now:
                     wait_seconds = (pub_time - now).total_seconds()
                     logger.info(f"Ожидание до публикации {i+1}: {int(wait_seconds)} сек")
